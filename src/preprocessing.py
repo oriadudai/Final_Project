@@ -120,47 +120,68 @@ def build_full_dataset(record_names):
 
 
 
-# רשימת subjects
-record_names = []
-
-for i in range(1, 54):
-
-    record_name = f"bidmc{str(i).zfill(2)}"
-
-    record_names.append(record_name)
 
 # LOSO Cross-Validation
-for test_subject in record_names:
+import random
 
-    print(f"\n===== Testing on {test_subject} =====")
+# הגדרת subjects
+record_names = [f"bidmc{str(i).zfill(2)}" for i in range(1, 54)]
 
-    # subject לבדיקה
-    test_subjects = [test_subject]
+# הפרשת Validation subjects (לפני ה-LOSO)
+random.seed(42)
+val_subjects = random.sample(record_names, 3)  # 2-3 subjects קבועים
+loso_subjects = [s for s in record_names if s not in val_subjects]
 
-    # כל שאר ה-subjects לאימון
-    train_subjects = [
-        subject for subject in record_names
-        if subject != test_subject
-    ]
+print(f"Validation subjects (for hyperparameter tuning): {val_subjects}")
+print(f"LOSO subjects: {len(loso_subjects)}")
 
-    print("Train subjects:", len(train_subjects))
-    print("Test subject:", test_subject)
+# Grid Search על ה-Validation subjects
+delta_options = [0.1, 0.5, 1.0]
+lambda_options = [0.1, 0.5, 1.0]
 
-    # בניית datasets
+val_dataset = build_full_dataset(val_subjects)
+
+best_params = None
+best_val_loss = float("inf")
+
+for delta in delta_options:
+    for lam in lambda_options:
+
+        print(f"\n--- Grid Search: delta={delta}, lambda={lam} ---")
+
+        # כאן תאמן מודל קטן על שאר ה-val subjects ותעריך על אחד מהם
+        # לדוגמה: train על 2, test על 1 מתוך ה-val_subjects
+        val_train = build_full_dataset(val_subjects[:-1])
+        val_test  = build_full_dataset([val_subjects[-1]])
+
+        # TODO: אימון מודל עם delta ו-lambda הנוכחיים
+        # val_loss = train_and_evaluate(val_train, val_test, delta, lam)
+
+        val_loss = 0.0  # placeholder — תחליפי בתוצאה האמיתית
+
+        print(f"Validation loss: {val_loss:.4f}")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_params = {"delta": delta, "lambda": lam}
+
+print(f"\n✅ Best hyperparameters: {best_params}")
+
+# LOSO על שאר ה-subjects עם הפרמטרים הטובים
+best_delta  = best_params["delta"]
+best_lambda = best_params["lambda"]
+
+for test_subject in loso_subjects:
+
+    print(f"\n===== LOSO Fold: Testing on {test_subject} =====")
+
+    train_subjects = [s for s in loso_subjects if s != test_subject]
+
     train_dataset = build_full_dataset(train_subjects)
+    test_dataset  = build_full_dataset([test_subject])
 
-    test_dataset = build_full_dataset(test_subjects)
+    print(f"Train size: {len(train_dataset)} | Test size: {len(test_dataset)}")
 
-    # מידע
-    print("\nTrain dataset size:", len(train_dataset))
-    print("Test dataset size:", len(test_dataset))
-
-    # בדיקת sample
-    print("\nFirst sample keys:")
-    print(train_dataset[0].keys())
-
-    print("\nPPG shape:")
-    print(train_dataset[0]["ppg"].shape)
-
-    print("\nECG shape:")
-    print(train_dataset[0]["ecg"].shape)
+    # TODO: אימון עם best_delta ו-best_lambda
+    # model = train_model(train_dataset, best_delta, best_lambda)
+    # results = evaluate_model(model, test_dataset)
