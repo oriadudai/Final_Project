@@ -119,25 +119,6 @@ def build_full_dataset(record_names):
     return full_dataset
 
 
-# חלוקה לפי subjects
-def split_subjects(record_names,
-                   train_ratio=0.7,
-                   val_ratio=0.1,
-                   test_ratio=0.2):
-
-    total_subjects = len(record_names)
-
-    train_end = int(total_subjects * train_ratio)
-    val_end = train_end + int(total_subjects * val_ratio)
-
-    train_subjects = record_names[:train_end]
-
-    val_subjects = record_names[train_end:val_end]
-
-    test_subjects = record_names[val_end:]
-
-    return train_subjects, val_subjects, test_subjects
-
 
 # רשימת subjects
 record_names = []
@@ -148,34 +129,38 @@ for i in range(1, 54):
 
     record_names.append(record_name)
 
-# חלוקת subjects
-train_subjects, val_subjects, test_subjects = split_subjects(record_names)
+# LOSO Cross-Validation
+for test_subject in record_names:
 
-print("Train subjects:", train_subjects)
-print("Validation subjects:", val_subjects)
-print("Test subjects:", test_subjects)
+    print(f"\n===== Testing on {test_subject} =====")
 
+    # subject לבדיקה
+    test_subjects = [test_subject]
 
-# בניית datasets
-train_dataset = build_full_dataset(train_subjects)
+    # כל שאר ה-subjects לאימון
+    train_subjects = [
+        subject for subject in record_names
+        if subject != test_subject
+    ]
 
-val_dataset = build_full_dataset(val_subjects)
+    print("Train subjects:", len(train_subjects))
+    print("Test subject:", test_subject)
 
-test_dataset = build_full_dataset(test_subjects)
+    # בניית datasets
+    train_dataset = build_full_dataset(train_subjects)
 
+    test_dataset = build_full_dataset(test_subjects)
 
-# מידע
-print("\nTrain dataset size:", len(train_dataset))
-print("Validation dataset size:", len(val_dataset))
-print("Test dataset size:", len(test_dataset))
+    # מידע
+    print("\nTrain dataset size:", len(train_dataset))
+    print("Test dataset size:", len(test_dataset))
 
+    # בדיקת sample
+    print("\nFirst sample keys:")
+    print(train_dataset[0].keys())
 
-# בדיקת sample
-print("\nFirst sample keys:")
-print(train_dataset[0].keys())
+    print("\nPPG shape:")
+    print(train_dataset[0]["ppg"].shape)
 
-print("\nPPG shape:")
-print(train_dataset[0]["ppg"].shape)
-
-print("\nECG shape:")
-print(train_dataset[0]["ecg"].shape)
+    print("\nECG shape:")
+    print(train_dataset[0]["ecg"].shape)
