@@ -1,86 +1,123 @@
+import numpy as np
 import torch
 import torch.nn as nn
-# Import sequence length from our centralized configuration
-from core.config import SEQ_LEN
+from scipy.signal import butter, sosfilt, resample
 
-class CompositeLoss(nn.Module):
+
+def load_clef_encoder(ckpt_path: str, model_size: str = "small", device=None):
+    """Load a pretrained CLEF encoder and freeze all parameters.
+
+    Checkpoint download:
+      curl -L "https://zenodo.org/records/17572734/files/clef_small.ckpt?download=1" \
+           -o models/clef/clef_small.ckpt
+
+    Args:
+        ckpt_path:  Path to the .ckpt file from Zenodo.
+        model_size: "small" (256-dim), "medium" (1024-dim), or "large" (2048-dim).
+        device:     torch.device to place the model on.
+
+    Returns:
+        Frozen nn.Module that maps (B, 1, 5000) → (B, feature_dim).
     """
-    Advanced Medical Signal Loss Function.
-    פונקציית הפסד משולבת המשלבת Huber Loss, תדר (STFT), ומשקולת לשיאי הדופק.
+    from clef.baselines.models.CLEF import create_net1d_by_size  # noqa: PLC0415
+
+    if device is None:
+        device = torch.device("cpu")
+    model = create_net1d_by_size(
+        device=device,
+        model_size=model_size,
+        n_classes=1000,
+        linear_prob=False,
+        pth=ckpt_path,
+        in_channels=1,
+    )
+    for p in model.parameters():
+        p.requires_grad = False
+    model.eval()
+    return model
+
+
+class ClinicalCompositeLoss(nn.Module):
+    """Huber loss + CLEF perceptual feature-matching loss.
+
+    L_total = HuberLoss(pred, true) + lambda_clinical * ||Φ(true) - Φ(pred)||²
+
+    Φ is a frozen pretrained CLEF encoder. The CLEF preprocessing pipeline
+    (resample 125→500 Hz, bandpass 0.67-40 Hz, per-window z-score) runs
+    inside _to_clef_input and is entirely separate from the main preprocessing
+    in src/preprocessing.py.
     """
-    def __init__(self, alpha=1.0, beta=0.5, gamma=2.0):
-        super(CompositeLoss, self).__init__()
-        self.alpha = alpha   # משקל עבור רכיב הזמן (Huber)
-        self.beta = beta     # משקל עבור רכיב התדר (STFT)
-        self.gamma = gamma   # משקל עבור שיאי ה-R-peak
-        
-        # Huber Loss (Smooth L1) robust to outliers and motion artifacts
-        self.huber = nn.HuberLoss()
 
-    def _compute_stft_loss(self, pred, target):
-        """
-        Computes the multi-resolution STFT magnitude difference.
-        מחשבת את מרחק ה-L1 בין התדרים של האות המשוחזר לאות האמת.
-        """
-        # הסרת מימד הערוץ האחרון לצורך הרצת הטרנספורם
-        pred_sq = pred.squeeze(-1)
-        target_sq = target.squeeze(-1)
-        
-        # הרצת Short-Time Fourier Transform (STFT)
-        stft_pred = torch.stft(pred_sq, n_fft=256, hop_length=64, win_length=256, return_complex=True)
-        stft_target = torch.stft(target_sq, n_fft=256, hop_length=64, win_length=256, return_complex=True)
-        
-        # חישוב מתאמי האמפליטודה (Magnitude) במרחב התדר
-        mag_pred = torch.abs(stft_pred)
-        mag_target = torch.abs(stft_target)
-        
-        # החזרת שגיאת ה-L1 הממוצעת בין מרחבי התדרים
-        return torch.mean(torch.abs(mag_pred - mag_target))
+    def __init__(
+        self,
+        clef_encoder: nn.Module,
+        lambda_clinical: float = 0.1,
+        huber_delta: float = 1.0,
+    ):
+        super().__init__()
+        self.clef_encoder = clef_encoder  # already frozen by load_clef_encoder
+        self.lambda_clinical = lambda_clinical
+        self.huber = nn.HuberLoss(delta=huber_delta)
 
-    def _generate_peak_mask(self, target, threshold=1.5, window_padding=10):
-        """
-        Dynamically isolates R-peaks on the Ground Truth ECG to construct a weight mask.
-        מייצרת מסיכת משקולות סביב שיאי ה-R-peak באות האמת כדי לתת להם חשיבות קלינית.
-        """
-        # יצירת מסיכת בסיס מלאה ב-1.0 (כלומר משקל רגיל לכל האות)
-        mask = torch.ones_like(target)
-        
-        # זיהוי פשוט של נקודות החורגות מסף האמפליטודה (מייצג את ה-QRS הקיצוני)
-        peaks = (target > threshold)
-        
-        if peaks.any():
-            # הרחבת המסיכה בכמה נקודות דגימה לכל כיוון סביב השיא כדי לתפוס את כל קומפלקס הגל
-            for idx in range(-window_padding, window_padding + 1):
-                shifted_peaks = torch.roll(peaks, shifts=idx, dims=1)
-                mask[shifted_peaks] = 10.0  # הענקת משקל גבוה פי 10 לטעות באזור ה-R-peak
-                
-        return mask
+        # Build Butterworth bandpass filter coefficients once (500 Hz, 0.67-40 Hz)
+        self._sos = butter(4, [0.67, 40.0], btype="band", fs=500, output="sos")
 
-    def forward(self, pred_ecg, true_ecg):
+    def _to_clef_input(self, x: torch.Tensor) -> torch.Tensor:
+        """Convert model-domain ECG tensor to CLEF-compatible input.
+
+        Pipeline (separate from main preprocessing):
+          (B, 1250, 1) at 125 Hz
+          → resample to 5000 samples at 500 Hz (same 10-second window)
+          → bandpass 0.67-40 Hz at 500 Hz  (matches CLEF training conditions)
+          → per-window z-score              (CLEF requirement)
+          → (B, 1, 5000) float32 tensor
         """
-        Calculates the weighted composite medical loss formulation.
+        # Detach from graph (only phi_pred needs gradients; phi_true does not)
+        x_np = x.squeeze(-1).detach().cpu().numpy()          # (B, 1250)
+        r = resample(x_np, 5000, axis=1)                     # (B, 5000) @ 500 Hz
+        r = sosfilt(self._sos, r, axis=1)                    # bandpass
+        mean = r.mean(axis=1, keepdims=True)
+        std  = r.std(axis=1,  keepdims=True) + 1e-8
+        r = (r - mean) / std                                 # per-window z-score
+        return torch.from_numpy(r.astype(np.float32)).unsqueeze(1).to(x.device)
+
+    def forward(
+        self,
+        pred_ecg: torch.Tensor,
+        true_ecg: torch.Tensor,
+    ) -> torch.Tensor:
         """
-        # 1. חישוב Huber Loss במרחב הזמן (Time Domain)
-        loss_time = self.huber(pred_ecg, true_ecg)
-        
-        # 2. חישוב הפסד במרחב התדר (Frequency Domain)
-        loss_freq = self._compute_stft_loss(pred_ecg, true_ecg)
-        
-        # 3. חישוב הפסד ממוקד פעימות (Peak-Aware Loss)
-        peak_mask = self._generate_peak_mask(true_ecg)
-        loss_peaks = torch.mean(peak_mask * (pred_ecg - true_ecg) ** 2)
-        
-        # שילוב משוקלל של כל הרכיבים יחד
-        total_loss = (self.alpha * loss_time) + (self.beta * loss_freq) + (self.gamma * loss_peaks)
-        return total_loss
+        Args:
+            pred_ecg: (B, SEQ_LEN, 1) reconstructed ECG
+            true_ecg: (B, SEQ_LEN, 1) ground-truth ECG
+        Returns:
+            Scalar loss tensor.
+        """
+        huber_loss = self.huber(pred_ecg, true_ecg)
+
+        # Ground-truth features: no gradients needed through the encoder
+        with torch.no_grad():
+            phi_true = self.clef_encoder(self._to_clef_input(true_ecg))
+
+        # Predicted features: gradients flow back into ReHeartNet through here
+        phi_pred = self.clef_encoder(self._to_clef_input(pred_ecg))
+
+        clinical_loss = torch.mean((phi_true - phi_pred) ** 2)
+        return huber_loss + self.lambda_clinical * clinical_loss
+
 
 if __name__ == "__main__":
-    print("=== Composite Loss Module Syntactically Verified ===")
-    criterion = CompositeLoss()
-    
-    # בדיקת תקינות מדומה עם ממדי ה-Batch הרגילים שלנו
-    mock_pred = torch.randn(4, 1250, 1)
-    mock_true = torch.randn(4, 1250, 1)
-    
-    calculated_loss = criterion(mock_pred, mock_true)
-    print(f"Executed forward pass. Calculated Mock Combined Loss: {calculated_loss.item():.4f}")
+    print("=== ClinicalCompositeLoss smoke test (random encoder) ===")
+    # Use a tiny random linear encoder as a stand-in for CLEF
+    dummy_encoder = nn.Sequential(
+        nn.Flatten(start_dim=1),
+        nn.Linear(5000, 256),
+    ).eval()
+    for p in dummy_encoder.parameters():
+        p.requires_grad = False
+
+    criterion = ClinicalCompositeLoss(dummy_encoder)
+    pred = torch.randn(4, 1250, 1)
+    true = torch.randn(4, 1250, 1)
+    loss = criterion(pred, true)
+    print(f"Loss: {loss.item():.4f}")

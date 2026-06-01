@@ -1,181 +1,90 @@
-import wfdb
+import os
 import numpy as np
-from scipy.signal import resample
+import wfdb
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import core.config as config
 
 
-# טעינת רשומת BIDMC
 def load_bidmc_record(record_name):
+    """Load ECG (Lead II) and PPG (PLETH) from a BIDMC WFDB record.
 
-    path = f"C:/Users/aslan/OneDrive/Desktop/PPG2ECG_project/data/BIDMC/{record_name}"
-
+    Both channels come from the same synchronized p_signal matrix.
+    Channel order varies per subject, so we look up by name.
+    The *n variants (bidmcXXn) are numerics files and must NOT be passed here.
+    """
+    path = os.path.join(config.DATA_DIR, "BIDMC", record_name)
     record = wfdb.rdrecord(path)
-
-    signals = record.p_signal
-
-    # חילוץ אותות ECG ו-PPG
-    ecg = signals[:, 0]
-    ppg = signals[:, 1]
-
-    return ecg, ppg
-
-
-# ביצוע Resampling לאות
-def resample_signal(signal, old_fs=125, new_fs=250):
-
-    new_length = int(len(signal) * new_fs / old_fs)
-
-    return resample(signal, new_length)
+    sig_names = [s.strip().rstrip(",").upper() for s in record.sig_name]
+    assert "PLETH" in sig_names and "II" in sig_names, (
+        f"Missing channels in {record_name}: {sig_names}"
+    )
+    ecg = record.p_signal[:, sig_names.index("II")]
+    ppg = record.p_signal[:, sig_names.index("PLETH")]
+    return ecg, ppg, record.fs
 
 
-# Normalization של האות
 def normalize_signal(signal):
-
+    """Z-score normalization over the full signal array."""
     mean = np.mean(signal)
     std = np.std(signal)
-
-    normalized_signal = (signal - mean) / std
-
-    return normalized_signal
-
-
-# חלוקת האות ל-segments
-def create_segments(signal, window_size, step_size):
-
-    segments = []
-
-    for start in range(0, len(signal) - window_size, step_size):
-
-        end = start + window_size
-
-        segment = signal[start:end]
-
-        segments.append(segment)
-
-    return np.array(segments)
+    if std < 1e-8:
+        return signal - mean
+    return (signal - mean) / std
 
 
-# בניית dataset עבור subject אחד
-def build_subject_dataset(record_name):
+def phase_align_ppg(ppg, ecg, max_lag=125):
+    """Shift PPG to reduce systematic phase offset relative to ECG.
 
-    # טעינת אותות
-    ecg, ppg = load_bidmc_record(record_name)
-
-    # התאמת תדר דגימה
-    ecg = resample_signal(ecg)
-    ppg = resample_signal(ppg)
-
-    # Normalization
-    ecg = normalize_signal(ecg)
-    ppg = normalize_signal(ppg)
-
-    # הגדרות segmentation
-    fs = 250
-
-    window_size = 10 * fs
-    step_size = 5 * fs
-
-    # יצירת segments
-    ecg_segments = create_segments(
-        ecg,
-        window_size,
-        step_size
-    )
-
-    ppg_segments = create_segments(
-        ppg,
-        window_size,
-        step_size
-    )
-
-    # יצירת dataset
-    dataset = []
-
-    for i in range(len(ecg_segments)):
-
-        sample = {
-            "ppg": ppg_segments[i],
-            "ecg": ecg_segments[i],
-            "subject_id": record_name
-        }
-
-        dataset.append(sample)
-
-    return dataset
+    Finds the lag that maximises cross-correlation within ±max_lag samples
+    (default ±1 second at 125 Hz) then rolls the PPG by that offset.
+    Applied to training windows only; never applied at test time.
+    """
+    N = len(ecg)
+    ecg_c = ecg - ecg.mean()
+    ppg_c = ppg - ppg.mean()
+    full_corr = np.correlate(ecg_c, ppg_c, mode="full")
+    center = N - 1
+    window = full_corr[center - max_lag : center + max_lag + 1]
+    lag = np.argmax(window) - max_lag
+    return np.roll(ppg, -lag)
 
 
-# בניית dataset ממספר subjects
-def build_full_dataset(record_names):
-
-    full_dataset = []
-
-    for record_name in record_names:
-
-        print(f"Loading {record_name}...")
-
-        subject_dataset = build_subject_dataset(record_name)
-
-        full_dataset.extend(subject_dataset)
-
-    return full_dataset
+def create_windows(signal, window_size, step_size):
+    """Slide a window across signal and return a stacked array of windows."""
+    starts = range(0, len(signal) - window_size + 1, step_size)
+    windows = [signal[s : s + window_size] for s in starts]
+    return np.array(windows, dtype=np.float32)
 
 
-# חלוקה לפי subjects
-def split_subjects(record_names,
-                   train_ratio=0.7,
-                   val_ratio=0.1,
-                   test_ratio=0.2):
+def build_subject_windows(record_name, apply_phase_align=False):
+    """Load, normalize, and window ECG+PPG for one BIDMC subject.
 
-    total_subjects = len(record_names)
+    Returns:
+        ppg_windows: np.ndarray of shape (N_windows, config.SEQ_LEN)
+        ecg_windows: np.ndarray of shape (N_windows, config.SEQ_LEN)
+    """
+    ecg_raw, ppg_raw, fs = load_bidmc_record(record_name)
 
-    train_end = int(total_subjects * train_ratio)
-    val_end = train_end + int(total_subjects * val_ratio)
+    ecg_norm = normalize_signal(ecg_raw)
+    ppg_norm = normalize_signal(ppg_raw)
 
-    train_subjects = record_names[:train_end]
+    window_size = config.SEQ_LEN          # 1250 samples = 10 s @ 125 Hz
+    step_size   = config.SEQ_LEN // 2    # 625 samples = 50 % overlap
 
-    val_subjects = record_names[train_end:val_end]
+    ecg_windows = create_windows(ecg_norm, window_size, step_size)
+    ppg_windows = create_windows(ppg_norm, window_size, step_size)
 
-    test_subjects = record_names[val_end:]
+    if apply_phase_align:
+        aligned = []
+        for ppg_w, ecg_w in zip(ppg_windows, ecg_windows):
+            aligned.append(phase_align_ppg(ppg_w, ecg_w))
+        ppg_windows = np.stack(aligned, axis=0)
 
-    return train_subjects, val_subjects, test_subjects
-
-
-# רשימת subjects
-record_names = []
-
-for i in range(1, 54):
-
-    record_name = f"bidmc{str(i).zfill(2)}"
-
-    record_names.append(record_name)
-
-# חלוקת subjects
-train_subjects, val_subjects, test_subjects = split_subjects(record_names)
-
-print("Train subjects:", train_subjects)
-print("Validation subjects:", val_subjects)
-print("Test subjects:", test_subjects)
+    return ppg_windows, ecg_windows
 
 
-# בניית datasets
-train_dataset = build_full_dataset(train_subjects)
-
-val_dataset = build_full_dataset(val_subjects)
-
-test_dataset = build_full_dataset(test_subjects)
-
-
-# מידע
-print("\nTrain dataset size:", len(train_dataset))
-print("Validation dataset size:", len(val_dataset))
-print("Test dataset size:", len(test_dataset))
-
-
-# בדיקת sample
-print("\nFirst sample keys:")
-print(train_dataset[0].keys())
-
-print("\nPPG shape:")
-print(train_dataset[0]["ppg"].shape)
-
-print("\nECG shape:")
-print(train_dataset[0]["ecg"].shape)
+def get_all_record_names():
+    """Return the list of the 53 main BIDMC record names."""
+    return [f"bidmc{i:02d}" for i in range(1, 54)]

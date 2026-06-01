@@ -1,10 +1,41 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 .ipynb_checkpoints/
+
+# Virtual environments
 venv/
 .env/
+conda-env/
+
+# Model checkpoints — large binaries, download separately
 checkpoints/
 *.pt
 *.pth
+*.ckpt
+
+# CLEF external repo — nested git repo, not tracked here.
+# Clone and install manually: see README Step 0 / environment.yml
+models/clef_repo/
+# CLEF pretrained weights — download from Zenodo (see README)
+models/clef/
+
+# Generated experiment outputs
+results/
+
+# Weights & Biases local runs
+wandb/
+
+# Optuna SQLite study database
+*.db
+
+# Graphify — generated code map (rebuild with: graphify update .)
+graphify-out/
+
+# IDE / OS
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db

@@ -1,118 +1,103 @@
-import os
+"""Evaluation pipeline for ReHeartNet CV folds.
+
+evaluate_fold() runs full clinical evaluation on a held-out test DataLoader
+and returns all four eval_logic metrics plus Pearson r.
+"""
+
+from typing import Dict
+
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-# מייבאים את הגדרות המערכת והנתיבים
-from core.config import DEVICE, SEQ_LEN, BATCH_SIZE, CHECKPOINT_DIR
+from torch.utils.data import DataLoader
+
+import core.config as config
 from core.models.reheartnet import ReHeartNet
-
-def compute_pearson_r(pred, target):
-    """
-    Computes the Pearson Correlation Coefficient (r) between reconstructed and ground truth signals.
-    מחשבת את מקדם המתאם של פירסון בין האות המשוחזר לאות האמת.
-    """
-    # השטחת הטנזורים למערכים חד-ממדיים לצורך החישוב
-    pred_flat = pred.detach().cpu().numpy().flatten()
-    target_flat = target.detach().cpu().numpy().flatten()
-    
-    # חישוב מטריצת המתאם ושליפת הערך הרלוונטי
-    corr_matrix = np.corrcoef(pred_flat, target_flat)
-    return corr_matrix[0, 1]
+from core.metrics.clinical_metrics import (
+    compute_prd,
+    compute_bce,
+    compute_emd,
+    compute_ks,
+    compute_beat_timing_mae,
+)
+from core.models.ptbxl_classifier import build_classifier
 
 
-def mock_pan_tompkins_beat_timing(pred_ecg, true_ecg):
-    """
-    Placeholder for the clinical Beat-Timing Error estimation using R-peak detection.
-    סימולציה של מדד שגיאת תזמון הפעימות המבוסס על אלגוריתם פאן-טומפקינס.
-    """
-    # בשלב הבא, חבר הצוות שאחראי על המדדים (Workstream 4) יחליף שורות אלו 
-    # בקריאה אמיתית ל- neurokit2.ecg_peaks() כדי למצוא את המיקום המדויק של ה-R-peaks.
-    
-    # כרגע, לצורך בדיקת שלמות הצינור, נחזיר שגיאת תזמון אקראית קטנה בשניות
-    simulated_error_seconds = np.random.uniform(0.01, 0.05)
-    return simulated_error_seconds
+def compute_pearson_r(pred: torch.Tensor, target: torch.Tensor) -> float:
+    """Pearson correlation coefficient between two tensors (flattened)."""
+    p = pred.detach().cpu().numpy().ravel()
+    t = target.detach().cpu().numpy().ravel()
+    corr = np.corrcoef(p, t)
+    return float(corr[0, 1])
 
 
-def evaluate_model(model, test_loader, device):
-    """
-    Runs inference on the test dataset and compiles medical and mathematical metrics.
-    מריצה הסקה על נתוני הטסט ומחשבת את כל המדדים להערכת ביצועי הרשת.
-    """
+def _collect_predictions(
+    model: nn.Module,
+    test_loader: DataLoader,
+    device: torch.device,
+) -> tuple:
+    """Run inference and return stacked numpy arrays (N, seq_len)."""
+    all_true, all_pred = [], []
     model.eval()
-    
-    # שימוש ב-MSE כבסיס למדד ה-RMSE של המאמר
-    mse_criterion = nn.MSELoss()
-    
-    total_mse = 0.0
-    all_pearson_r = []
-    all_beat_errors = []
-    
-    print("Running evaluation inference on test split batches...")
-    
-    # ביטול חישוב הגרדיאנטים כדי למנוע עומס על הזיכרון והמעבד
     with torch.no_grad():
         for ppg, ecg in test_loader:
-            ppg, ecg = ppg.to(device), ecg.to(device)
-            
-            # הרצת אות ה-PPG במודל הקפוא לקבלת השחזור
-            predictions = model(ppg)
-            
-            # 1. חישוב מדד השגיאה הריבועית
-            loss_mse = mse_criterion(predictions, ecg)
-            total_mse += loss_mse.item()
-            
-            # 2. חישוב מקדם המתאם של פירסון עבור ה-Batch הנוכחי
-            r_val = compute_pearson_r(predictions, ecg)
-            all_pearson_r.append(r_val)
-            
-            # 3. חישוב שגיאת תזמון הפעימות הקלינית
-            beat_err = mock_pan_tompkins_beat_timing(predictions, ecg)
-            all_beat_errors.append(beat_err)
-            
-    # חישוב הממוצעים הסופיים של המדדים
-    avg_rmse = np.sqrt(total_mse / len(test_loader))
-    avg_pearson_r = np.mean(all_pearson_r)
-    avg_beat_error = np.mean(all_beat_errors)
-    
-    return avg_rmse, avg_pearson_r, avg_beat_error
+            ppg = ppg.to(device)
+            pred = model(ppg)
+            all_true.append(ecg.squeeze(-1).cpu().numpy())   # (B, seq_len)
+            all_pred.append(pred.squeeze(-1).cpu().numpy())  # (B, seq_len)
+    true_arr = np.concatenate(all_true, axis=0)   # (N, seq_len)
+    pred_arr = np.concatenate(all_pred, axis=0)   # (N, seq_len)
+    return true_arr, pred_arr
 
 
-def main():
-    print("=== ReHeartNet Clinical Evaluation Pipeline ===")
-    
-    # 1. יצירת מופע של הרשת והעברתו למעבד
-    model = ReHeartNet().to(DEVICE)
-    
-    # 2. ניסיון טעינה של מודל מאומן מתוך תיקיית ה-Checkpoints
-    checkpoint_path = os.path.join(CHECKPOINT_DIR, "best_reheartnet_model.pt")
-    
-    if os.path.exists(checkpoint_path):
-        print(f"Loading trained weights from checkpoint: {checkpoint_path}")
-        # במצב מקומי ללא GPU, אנו מוודאים שהמשקולות נפתחות ישירות על ה-CPU
-        checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        print("Model weights loaded successfully.")
-    else:
-        print("⚠️ No trained checkpoint found. Running evaluation on randomly initialized weights.")
-        
-    # 3. יצירת נתוני מבחן מדומים (Mock Test Data) קלים ביותר לבדיקת שלמות הצינור
-    # אנו מייצרים קבוצה בודדת (Batch) כדי לא להעמיס על המחשב שלך
-    mock_test_loader = [
-        (torch.randn(BATCH_SIZE, SEQ_LEN, 1), torch.randn(BATCH_SIZE, SEQ_LEN, 1))
-    ]
-    
-    # 4. הרצת תהליך ההערכה המלא
-    rmse, pearson_r, beat_timing_err = evaluate_model(model, mock_test_loader, DEVICE)
-    
-    # הדפסת טבלת המדדים הסופית באנגלית למסך הטרמינל
-    print("\n==================================================")
-    print("📊 FINAL QUANTITATIVE EVALUATION RESULTS")
-    print("==================================================")
-    print(f"RMSE (mV)               : {rmse:.4f} (Lower is better)")
-    print(f"Pearson Correlation (r) : {pearson_r:.4f} (Closer to 1.0 is better)")
-    print(f"Beat-Timing Error (sec) : {beat_timing_err:.4f} (Lower is better)")
-    print("==================================================")
-    print("=== Evaluation Pipeline Verification Completed ===")
+def evaluate_fold(
+    model: ReHeartNet,
+    test_loader: DataLoader,
+    ptbxl_classifier: nn.Module,
+    device: torch.device,
+    fs: int = config.FS,
+    clef_encoder: nn.Module = None,
+) -> Dict[str, float]:
+    """Compute all clinical metrics for one CV fold test set.
 
-if __name__ == "__main__":
-    main()
+    If clef_encoder is provided, BCE uses CLEFClassifier (pretrained 256-dim
+    clinical features from CLEF backbone). Otherwise falls back to
+    ptbxl_classifier (surrogate with random weights).
+
+    Returns a dict with keys:
+        prd             - Percentage Root Mean Square Difference (lower better)
+        pearson_r       - Pearson correlation coefficient (higher better)
+        bce             - BCE in CLEF clinical feature space (lower better)
+        emd             - Earth Mover's Distance on RR intervals (lower better)
+        ks_stat         - KS test D-statistic on RR intervals (lower better)
+        ks_pvalue       - KS test p-value (>0.05 is desirable)
+        beat_timing_mae - Mean absolute R-peak timing error in seconds (lower better)
+    """
+    # Use CLEF-based classifier if available, else fall back to surrogate
+    classifier = build_classifier(clef_encoder) if clef_encoder is not None else ptbxl_classifier
+    classifier = classifier.to(device)
+
+    true_arr, pred_arr = _collect_predictions(model, test_loader, device)
+
+    # Pearson r (computed sample-wise then averaged)
+    pearson_vals = []
+    for t, p in zip(true_arr, pred_arr):
+        if np.std(t) > 1e-8 and np.std(p) > 1e-8:
+            pearson_vals.append(float(np.corrcoef(t, p)[0, 1]))
+    pearson_r = float(np.mean(pearson_vals)) if pearson_vals else float("nan")
+
+    prd     = compute_prd(true_arr, pred_arr)
+    bce     = compute_bce(true_arr, pred_arr, classifier, device)
+    emd     = compute_emd(true_arr, pred_arr, fs=fs)
+    ks_stat, ks_pval = compute_ks(true_arr, pred_arr, fs=fs)
+    beat_mae = compute_beat_timing_mae(true_arr, pred_arr, fs=fs)
+
+    return {
+        "prd":             prd,
+        "pearson_r":       pearson_r,
+        "bce":             bce,
+        "emd":             emd,
+        "ks_stat":         ks_stat,
+        "ks_pvalue":       ks_pval,
+        "beat_timing_mae": beat_mae,
+    }

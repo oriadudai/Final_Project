@@ -1,140 +1,208 @@
 import os
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-# ייבוא הפרמטרים המרכזיים שקבענו בקובץ הקונפיגורציה
-from core.config import DEVICE, BATCH_SIZE, SEQ_LEN, LEARNING_RATE, EPOCHS, CHECKPOINT_DIR
-# ייבוא רשת ה-ReHeartNet שבנינו
-from core.models.reheartnet import ReHeartNet
+from torch.utils.data import DataLoader
 
-# ננסה לייבא את wandb. אם הוא לא מותקן בסביבה, נדמה אותו כדי שהקוד לא יקרוס
+import core.config as config
+from core.models.reheartnet import ReHeartNet
+from core.losses.composite_loss import ClinicalCompositeLoss
+
 try:
     import wandb
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device):
-    """
-    Runs a single training epoch across all training batches.
-    מריצה מחזור אימון יחיד על פני כל קבוצות הנתונים של ה-Train.
-    """
+
+def train_one_epoch(
+    model: nn.Module,
+    dataloader: DataLoader,
+    criterion: nn.Module,
+    optimizer: optim.Optimizer,
+    device: torch.device,
+) -> float:
+    """Run one training epoch. Returns average batch loss."""
     model.train()
     running_loss = 0.0
-    
-    for batch_idx, (ppg, ecg) in enumerate(dataloader):
-        # העברת הטנזורים להתקן העיבוד הנבחר (CPU או GPU)
+    for ppg, ecg in dataloader:
         ppg, ecg = ppg.to(device), ecg.to(device)
-        
-        # איפוס הגרדיאנטים של האופטימייזר מהצעד הקודם
         optimizer.zero_grad()
-        
-        # Propagation קדימה: הרצת אות ה-PPG דרך הרשת לקבלת ה-ECG המשוחזר
         predictions = model(ppg)
-        
-        # חישוב פונקציית ההפסד (כרגע MSE כברירת מחדל של המאמר המקורי)
         loss = criterion(predictions, ecg)
-        
-        # Propagation אחורה: חישוב הנגזרות והגרדיאנטים
         loss.backward()
-        
-        # עדכון משקולות המודל בהתאם לגרדיאנטים שחושבו
         optimizer.step()
-        
         running_loss += loss.item()
-        
-    # החזרת ממוצע פונקציית ההפסד עבור ה-Epoch הנוכחי
     return running_loss / len(dataloader)
 
 
-def validate(model, dataloader, criterion, device):
-    """
-    Evaluates the model performance on the validation split.
-    מעריכה את ביצועי המודל על נתוני הבדיקה (Validation) ללא עדכון משקולות.
-    """
+def validate(
+    model: nn.Module,
+    dataloader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+) -> float:
+    """Evaluate model on a validation DataLoader. Returns average batch loss."""
     model.eval()
     running_loss = 0.0
-    
-    # חוסך זיכרון וזמן חישוב ע"י ביטול מנגנון מעקב הגרדיאנטים של PyTorch
     with torch.no_grad():
         for ppg, ecg in dataloader:
             ppg, ecg = ppg.to(device), ecg.to(device)
             predictions = model(ppg)
             loss = criterion(predictions, ecg)
             running_loss += loss.item()
-            
     return running_loss / len(dataloader)
 
 
-def main():
-    print("=== Initializing ReHeartNet Training Pipeline ===")
-    
-    # 1. אתחול ה-Weights & Biases לצורך מעקב גרפים, אם הספריה מותקנת
-    if WANDB_AVAILABLE:
+def train_fold(
+    fold_idx: int,
+    fold_subjects: List[str],
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    clef_encoder: nn.Module,
+    device: torch.device,
+    epochs: int = config.EPOCHS,
+    lr: float = config.LEARNING_RATE,
+    lambda_clinical: float = config.LAMBDA_CLINICAL,
+    huber_delta: float = config.HUBER_DELTA,
+    hidden_size: int = config.HIDDEN_SIZE,
+    checkpoint_dir: str = config.CHECKPOINT_DIR,
+    use_wandb: bool = True,
+    early_stop_patience: int = 15,
+    lr_patience: int = 10,
+    model_name: str = "reheartnet",
+    loss_type:  str = "clef",
+) -> Tuple[nn.Module, Dict[str, List[float]]]:
+    """Train a model for one CV fold.
+
+    A fresh model is created per fold to ensure no information leaks between
+    folds. clef_encoder is shared across folds but is frozen throughout.
+
+    Args:
+        fold_idx:        Integer index of this fold (0-based).
+        fold_subjects:   List of subject IDs in the test set (used for logging).
+        train_loader:    DataLoader for the inner training split.
+        val_loader:      DataLoader for the inner validation split.
+        clef_encoder:    Frozen CLEF encoder (shared, built once outside).
+        device:          Compute device.
+        epochs:          Maximum training epochs.
+        lr:              Initial Adam learning rate.
+        lambda_clinical: Weight for CLEF feature loss term.
+        huber_delta:     Huber loss delta parameter.
+        hidden_size:     BiLSTM hidden units per direction.
+        checkpoint_dir:  Directory for saving best-model checkpoints.
+        use_wandb:       Whether to log metrics to Weights & Biases.
+        early_stop_patience: Epochs without val improvement before stopping.
+        lr_patience:     Epochs without val improvement before halving LR.
+        model_name:      Architecture to train: "reheartnet", "linear", "lstm",
+                         or "bilstm" (see core.models.baselines.get_model).
+        loss_type:       "clef"  → Huber + CLEF perceptual loss (default, our method)
+                         "huber" → Huber only (lambda_clinical forced to 0)
+                         "mse"   → Plain MSE, no Huber, no CLEF (original ReHeartNet)
+
+    Returns:
+        (trained_model, loss_history) where loss_history is a dict with
+        keys "train" and "val" mapping to lists of per-epoch losses.
+    """
+    from core.models.baselines import get_model  # noqa: PLC0415
+
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    model = get_model(model_name, hidden_size=hidden_size,
+                      seq_len=config.SEQ_LEN).to(device)
+
+    if loss_type == "mse":
+        criterion = nn.MSELoss()
+    elif loss_type == "huber":
+        # Huber only — no CLEF term
+        criterion = nn.HuberLoss(delta=huber_delta)
+    else:
+        # Default: Huber + CLEF perceptual loss
+        criterion = ClinicalCompositeLoss(clef_encoder, lambda_clinical, huber_delta)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=lr_patience
+    )
+
+    run_name = f"{model_name}_fold_{fold_idx:02d}"
+    if use_wandb and WANDB_AVAILABLE:
         wandb.init(
             project="ppg2ecg-reheartnet",
+            name=run_name,
             config={
-                "learning_rate": LEARNING_RATE,
-                "epochs": EPOCHS,
-                "batch_size": BATCH_SIZE,
-                "sequence_length": SEQ_LEN,
-                "device": str(DEVICE)
-            }
+                "model": model_name,
+                "loss_type": loss_type,
+                "fold": fold_idx,
+                "test_subjects": fold_subjects,
+                "lr": lr,
+                "lambda_clinical": lambda_clinical,
+                "huber_delta": huber_delta,
+                "hidden_size": hidden_size,
+                "epochs": epochs,
+            },
+            reinit=True,
         )
-        print("Weights & Biases logger successfully initialized.")
-    else:
-        print("Wandb not found. Running training loop with local console logging only.")
-
-    # 2. אתחול המודל, פונקציית ההפסד והאופטימייזר
-    model = ReHeartNet().to(DEVICE)
-    criterion = nn.MSELoss()  # פונקציית ההפסד המקורית מהמאמר (RMSE/MSE)
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-
-    # 3. יצירת דאטא מדומה (Mock Data) לצורך בדיקת שלמות המערכת התחבירית
-    # אנו מדמים 3 קבוצות (Batches) עבור אימון ו-2 קבוצות עבור וולידציה
-    print("Generating simulated medical signal tensors for verification...")
-    mock_train_loader = [
-        (torch.randn(BATCH_SIZE, SEQ_LEN, 1), torch.randn(BATCH_SIZE, SEQ_LEN, 1))
-        for _ in range(3)
-    ]
-    mock_val_loader = [
-        (torch.randn(BATCH_SIZE, SEQ_LEN, 1), torch.randn(BATCH_SIZE, SEQ_LEN, 1))
-        for _ in range(2)
-    ]
 
     best_val_loss = float("inf")
+    no_improve    = 0
+    history: Dict[str, List[float]] = {"train": [], "val": []}
 
-    # 4. לולאת האימון המרכזית (מריצה 3 מחזורים בלבד בבדיקה הסינתטית הזו)
-    test_epochs = 3
-    print(f"Starting execution verification loop for {test_epochs} test epochs...")
-    
-    for epoch in range(1, test_epochs + 1):
-        train_loss = train_one_epoch(model, mock_train_loader, criterion, optimizer, DEVICE)
-        val_loss = validate(model, mock_val_loader, criterion, DEVICE)
-        
-        # הדפסת התוצאות באנגלית לחלון הטרמינל
-        print(f"Epoch [{epoch}/{test_epochs}] -> Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f}")
-        
-        # שליחת הנתונים לשרתי Wandb בזמן אמת
-        if WANDB_AVAILABLE:
-            wandb.log({"train_loss": train_loss, "val_loss": val_loss, "epoch": epoch})
-            
-        # מנגנון שמירה של ה-Model Checkpoint הטוב ביותר על בסיס ה-Validation Loss
+    for epoch in range(1, epochs + 1):
+        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        val_loss   = validate(model, val_loader, criterion, device)
+
+        history["train"].append(train_loss)
+        history["val"].append(val_loss)
+
+        scheduler.step(val_loss)
+
+        print(
+            f"[Fold {fold_idx:02d} | Epoch {epoch:03d}/{epochs}] "
+            f"train={train_loss:.5f}  val={val_loss:.5f}"
+        )
+
+        if use_wandb and WANDB_AVAILABLE:
+            wandb.log({
+                "fold": fold_idx,
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+            })
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            checkpoint_path = os.path.join(CHECKPOINT_DIR, "best_reheartnet_model.pt")
+            no_improve    = 0
+            ckpt_path = os.path.join(checkpoint_dir, f"{model_name}_fold_{fold_idx:02d}_best.pt")
             torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': val_loss,
-            }, checkpoint_path)
-            print(f"Saved new optimal model checkpoint to: {checkpoint_path}")
+                "fold":                fold_idx,
+                "fold_subjects":       fold_subjects,
+                "epoch":               epoch,
+                "model_state_dict":    model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "val_loss":            val_loss,
+                "hidden_size":         hidden_size,
+            }, ckpt_path)
+        else:
+            no_improve += 1
+            if no_improve >= early_stop_patience:
+                print(f"  Early stopping at epoch {epoch} (no improvement for {early_stop_patience} epochs)")
+                break
 
-    if WANDB_AVAILABLE:
+    if use_wandb and WANDB_AVAILABLE:
         wandb.finish()
-        
-    print("=== Training Pipeline Verification Completed Successfully ===")
 
-if __name__ == "__main__":
-    main()
+    # Reload best weights before returning
+    ckpt_path = os.path.join(checkpoint_dir, f"{model_name}_fold_{fold_idx:02d}_best.pt")
+    if os.path.exists(ckpt_path):
+        ckpt = torch.load(ckpt_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+
+    return model, history
+
+
+def split_train_val(dataset, val_fraction: float = 0.1, seed: int = 42):
+    """Thin wrapper kept here for import convenience — delegates to data_loader."""
+    from core.data_loader import split_train_val as _split
+    return _split(dataset, val_fraction=val_fraction, seed=seed)
