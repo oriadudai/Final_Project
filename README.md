@@ -6,7 +6,7 @@ Built on **Lee et al. (2026)**, extended with:
 - **Huber loss** replacing MSE — robust to QRS transients
 - **CLEF perceptual loss** — frozen ECG foundation model (Nokia Bell Labs) enforces clinical feature consistency during training
 - **8-fold group cross-validation** — subject-disjoint, ~7 test subjects per fold
-- **Optuna hyperparameter search** — tunes lr, λ, δ, batch size, hidden size
+- **Optuna hyperparameter search** — tunes lr, λ, δ, hidden size (batch size is paper-specified)
 - **Clinical evaluation metrics** — PRD, BCE (via CLEF features), EMD, KS test on RR intervals
 
 ---
@@ -80,14 +80,13 @@ python scripts/tune_hyperparams.py --clef-path models/clef/clef_small.ckpt --ful
 python scripts/tune_hyperparams.py --clef-path models/clef/clef_small.ckpt --resume
 ```
 
-**What Optuna searches** (all 5 hyperparameters):
+**What Optuna searches** (4 hyperparameters — batch size is paper-specified = 1):
 
 | Hyperparameter | Search space | Scale | Default |
 |---|---|---|---|
 | Learning rate `lr` | [1e-4, 1e-2] | log-uniform | 1e-3 |
 | CLEF loss weight `lambda_clinical` | [1e-3, 1.0] | log-uniform | 0.1 |
 | Huber delta `huber_delta` | [0.1, 2.0] | uniform | 1.0 |
-| Batch size | {32, 64, 128} | categorical | 64 |
 | Hidden size `H` | {32, 64, 128} | categorical | 64 |
 
 **Speed modes:**
@@ -102,7 +101,7 @@ python scripts/tune_hyperparams.py --clef-path models/clef/clef_small.ckpt --res
 
 | File | Description |
 |------|-------------|
-| `best_hyperparams.json` | Best lr, λ, δ, batch size, hidden size |
+| `best_hyperparams.json` | Best lr, λ, δ, hidden size |
 | `optuna_study.db` | SQLite study (resumable) |
 | `figures/optuna_history.png` | Trial convergence |
 | `figures/optuna_importances.png` | Parameter importances |
@@ -214,7 +213,7 @@ results/
 
 checkpoints/                         ← ignored by git
 ├── reheartnet_fold_XX_best.pt       ← Step 2
-├── reheartnet_{original,mse,huber,clef}_fold_XX_best.pt  ← Step 3
+├── reheartnet_{original,huber,clef}_fold_XX_best.pt  ← Step 3
 ```
 
 ---
@@ -243,7 +242,7 @@ Final_Project/
 │   └── preprocessing.py            # WFDB loading, z-score, FIR bandpass, windowing, phase align
 ├── scripts/
 │   ├── tune_hyperparams.py         # Step 1 — Optuna search (--fast / default / --full)
-│   ├── compare_reheartnet.py       # Step 3 — 4-way comparison (original/MSE/Huber/CLEF)
+│   ├── compare_reheartnet.py       # Step 3 — 3-way comparison (original/Huber/CLEF)
 │   ├── sanity_check.py             # Quick end-to-end test (~2 min)
 │   └── setup_clef.py               # Clone + patch + install CLEF
 ├── run_cv.py                       # Steps 2 & 4 — main CV entry point
@@ -333,7 +332,7 @@ clinical feature scores (sigmoid-activated). BCE between real and reconstructed 
 diagnostic consistency in CLEF's clinically-supervised feature space. No PTB-XL data needed.
 
 `CLEFClassifier` requires **10 s input** (it resamples to 5000 samples at 500 Hz internally).
-For 4 s models (original/MSE/Huber), BCE is evaluated on a **separate 10 s test DataLoader**
+For 4 s models (original/Huber), BCE is evaluated on a **separate 10 s test DataLoader**
 built from the same held-out subjects — the BiLSTM is sequence-length agnostic so the trained
 model runs on 10 s PPG windows at eval time. PRD, Pearson r, EMD, KS, and Beat MAE are still
 evaluated on 4 s windows consistent with training.
@@ -358,16 +357,18 @@ R-peaks detected with `neurokit2.ecg_peaks()` (Pan-Tompkins). Windows with <3 pe
 [core/config.py](core/config.py) — parameters confirmed in Lee et al. vs. our defaults:
 
 ```python
-# ── Confirmed in Lee et al. (2026) ────────────────────────────────────────
+# ── Confirmed in Lee et al. (2026) supplementary ──────────────────────────
 FS              = 125       # BIDMC native sampling rate (Hz)
 NUM_BLOCKS      = 5         # 5 stacked DC-BiLSTM blocks
+BATCH_SIZE      = 1         # paper-specified; not tuned by Optuna
+LEARNING_RATE   = 1e-2      # paper-specified initial lr (linear-decay schedule)
+EPOCHS          = 1000      # paper-specified training length (no early stopping)
 
-# ── Not in paper (supplementary only) — our defaults, all tuned by Optuna ─
-SEQ_LEN         = 1250      # 10 s × 125 Hz
+# ── Not in paper — our defaults ───────────────────────────────────────────
+SEQ_LEN         = 1250      # default window = 10 s × 125 Hz (CLEF model)
+                            # compare_reheartnet.py overrides to 500 (4 s) for
+                            # original and Huber variants
 HIDDEN_SIZE     = 64        # BiLSTM hidden units per direction  [Optuna: 32/64/128]
-BATCH_SIZE      = 64        #                                    [Optuna: 32/64/128]
-LEARNING_RATE   = 1e-3      # Adam initial lr                    [Optuna: 1e-4–1e-2]
-EPOCHS          = 100       # max epochs (early stopping patience=15)
 
 # ── Our contributions (not in original paper) ─────────────────────────────
 LAMBDA_CLINICAL = 0.1       # CLEF perceptual loss weight        [Optuna: 1e-3–1.0]
@@ -388,7 +389,7 @@ simultaneous ECG + PPG at 125 Hz, ~8 minutes each.
 2. Z-score normalise over the full recording
 3. Optionally apply FIR bandpass filter: ECG 0.5–55 Hz, PPG 0.5–10 Hz (Lee et al. original only)
 4. Segment into fixed-length windows:
-   - **Original / our MSE / our Huber**: 4 s (500 samples), no overlap, FIR bandpass → **~120 windows/subject**
+   - **Original / Huber**: 4 s (500 samples), no overlap, FIR bandpass → **~120 windows/subject**
    - **Our CLEF model**: 10 s (1250 samples), 50% overlap, z-score only → **~95 windows/subject**
 5. Phase-align PPG to ECG via cross-correlation (training windows only)
 

@@ -112,7 +112,7 @@ def _run_single_model(
     lr              = float(best.get("lr",              config.LEARNING_RATE))
     lambda_clinical = float(best.get("lambda_clinical", config.LAMBDA_CLINICAL))
     huber_delta     = float(best.get("huber_delta",     config.HUBER_DELTA))
-    batch_size      = int(best.get("batch_size",        config.BATCH_SIZE))
+    batch_size      = config.BATCH_SIZE   # paper-specified; not read from Optuna
     hidden_size     = int(best.get("hidden_size",       config.HIDDEN_SIZE))
     epochs          = int(best.get("epochs",            config.EPOCHS))
 
