@@ -2,6 +2,7 @@ import os
 import numpy as np
 import wfdb
 import sys
+from scipy.signal import firwin, lfilter
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import core.config as config
@@ -34,6 +35,19 @@ def normalize_signal(signal):
     return (signal - mean) / std
 
 
+def bandpass_fir(signal: np.ndarray, low_hz: float, high_hz: float, fs: float,
+                 numtaps: int = 127) -> np.ndarray:
+    """Type-I linear-phase FIR bandpass filter (constant group delay across spectrum).
+
+    Matches the filter described in Lee et al.: ECG 0.5–55 Hz, PPG 0.5–10 Hz.
+    numtaps=127 → group delay of 63 samples; both signals share the same delay,
+    so relative ECG/PPG alignment is preserved.
+    """
+    nyq = fs / 2.0
+    coeffs = firwin(numtaps, [low_hz / nyq, high_hz / nyq], pass_zero=False)
+    return lfilter(coeffs, 1.0, signal)
+
+
 def phase_align_ppg(ppg, ecg, max_lag=125):
     """Shift PPG to reduce systematic phase offset relative to ECG.
 
@@ -58,20 +72,42 @@ def create_windows(signal, window_size, step_size):
     return np.array(windows, dtype=np.float32)
 
 
-def build_subject_windows(record_name, apply_phase_align=False):
-    """Load, normalize, and window ECG+PPG for one BIDMC subject.
+def build_subject_windows(
+    record_name,
+    apply_phase_align: bool = False,
+    window_sec: float = None,
+    overlap_frac: float = 0.5,
+    apply_bandpass: bool = False,
+):
+    """Load, normalize, filter, and window ECG+PPG for one BIDMC subject.
+
+    Args:
+        record_name:       BIDMC record identifier (e.g. "bidmc01").
+        apply_phase_align: Cross-correlation phase alignment of PPG to ECG.
+                           Apply to training windows only; never at test time.
+        window_sec:        Window length in seconds.  None → config.SEQ_LEN
+                           (default 10 s = 1250 samples @ 125 Hz).
+                           Pass 4.0 to match the original Lee et al. setup.
+        overlap_frac:      Fraction of window overlap between consecutive windows.
+                           0.0 = non-overlapping (original paper), 0.5 = 50% (our default).
+        apply_bandpass:    If True, apply type-I FIR bandpass before windowing:
+                           ECG 0.5–55 Hz, PPG 0.5–10 Hz (matches Lee et al.).
 
     Returns:
-        ppg_windows: np.ndarray of shape (N_windows, config.SEQ_LEN)
-        ecg_windows: np.ndarray of shape (N_windows, config.SEQ_LEN)
+        ppg_windows: np.ndarray of shape (N_windows, window_size)
+        ecg_windows: np.ndarray of shape (N_windows, window_size)
     """
     ecg_raw, ppg_raw, fs = load_bidmc_record(record_name)
 
     ecg_norm = normalize_signal(ecg_raw)
     ppg_norm = normalize_signal(ppg_raw)
 
-    window_size = config.SEQ_LEN          # 1250 samples = 10 s @ 125 Hz
-    step_size   = config.SEQ_LEN // 2    # 625 samples = 50 % overlap
+    if apply_bandpass:
+        ecg_norm = bandpass_fir(ecg_norm, 0.5, 55.0, fs)
+        ppg_norm = bandpass_fir(ppg_norm, 0.5, 10.0, fs)
+
+    window_size = int(round(window_sec * fs)) if window_sec is not None else config.SEQ_LEN
+    step_size   = max(1, int(round(window_size * (1.0 - overlap_frac))))
 
     ecg_windows = create_windows(ecg_norm, window_size, step_size)
     ppg_windows = create_windows(ppg_norm, window_size, step_size)

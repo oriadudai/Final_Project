@@ -145,13 +145,18 @@ python run_cv.py --clef-path models/clef/clef_small.ckpt --dry-run --no-wandb
 
 ### Step 3 — ReHeartNet Comparison *(vs original paper)*
 
-Runs three variants of the same DC-BiLSTM architecture to isolate each contribution:
+Runs three variants of the same DC-BiLSTM architecture with the same training
+protocol as Lee et al. — only the loss function changes:
 
-| Variant | Loss | Purpose |
-|---------|------|---------|
-| `reheartnet_mse` | MSE | Faithful replica of Lee et al. (2026) |
-| `reheartnet_huber` | Huber only (λ=0) | Isolates the Huber loss effect |
-| `reheartnet_clef` | Huber + CLEF | Our full method |
+| Variant | Windows | Loss | Purpose |
+|---------|---------|------|---------|
+| `reheartnet_original` | 4 s, no overlap, FIR bandpass | MSE | Faithful replica of Lee et al. (2026) |
+| `reheartnet_huber` | 4 s, no overlap, FIR bandpass | Huber | Effect of Huber loss |
+| `reheartnet_clef` | 10 s, 50% overlap, z-score only | Huber + CLEF | Our full method |
+
+> All variants use batch=1, lr=1e-2, ×0.75 linear decay every 50 epochs, 1000 epochs (paper protocol).
+> The only thing Optuna tunes is `huber_delta`, `lambda_clinical`, and `hidden_size` — not the training dynamics.
+> `reheartnet_clef` uses 10 s windows because the CLEF encoder requires 10 s input (see BCE note below).
 
 ```bash
 python scripts/compare_reheartnet.py --clef-path models/clef/clef_small.ckpt
@@ -168,10 +173,10 @@ python scripts/compare_reheartnet.py --clef-path models/clef/clef_small.ckpt --d
 | `comparison.json` | Side-by-side mean ± CI, all three variants |
 | `figures/comparison_panel.png` | **Main comparison figure** (2×3 panel, all 6 metrics) |
 | `figures/cmp_{metric}.png` | Per-metric bar chart (green outline = best) |
-| `summary_reheartnet_{mse,huber,clef}.json` | Per-variant summaries |
+| `summary_reheartnet_{original,huber,clef}.json` | Per-variant summaries |
 
-> `Δ_Huber` = MSE → Huber row gap = benefit of robust loss  
-> `Δ_CLEF`  = Huber → CLEF row gap = benefit of clinical regularisation
+> `Δ_Huber` = original → Huber gap = benefit of Huber loss  
+> `Δ_CLEF`  = Huber → CLEF gap = benefit of CLEF clinical perceptual regularisation
 
 ---
 
@@ -209,7 +214,7 @@ results/
 
 checkpoints/                         ← ignored by git
 ├── reheartnet_fold_XX_best.pt       ← Step 2
-├── reheartnet_{mse,huber,clef}_fold_XX_best.pt  ← Step 3
+├── reheartnet_{original,mse,huber,clef}_fold_XX_best.pt  ← Step 3
 ```
 
 ---
@@ -220,8 +225,8 @@ checkpoints/                         ← ignored by git
 Final_Project/
 ├── core/
 │   ├── config.py                   # All hyperparameters and paths
-│   ├── data_loader.py              # BIDMCDataset, build_group_fold, get_cv_splits
-│   ├── train.py                    # train_fold() — loss_type: mse/huber/clef
+│   ├── data_loader.py              # BIDMCDataset, build_group_fold, build_test_dataset, get_cv_splits
+│   ├── train.py                    # train_fold() — loss_type: mse/huber/clef; lr_schedule: plateau/linear_decay
 │   ├── evaluate.py                 # evaluate_fold() — all 6 clinical metrics
 │   ├── losses/
 │   │   └── composite_loss.py       # ClinicalCompositeLoss + load_clef_encoder()
@@ -235,10 +240,10 @@ Final_Project/
 │   └── visualization/
 │       └── plots.py                # All figure generation
 ├── src/
-│   └── preprocessing.py            # WFDB loading, z-score, windowing, phase align
+│   └── preprocessing.py            # WFDB loading, z-score, FIR bandpass, windowing, phase align
 ├── scripts/
 │   ├── tune_hyperparams.py         # Step 1 — Optuna search (--fast / default / --full)
-│   ├── compare_reheartnet.py       # Step 3 — MSE vs Huber vs CLEF
+│   ├── compare_reheartnet.py       # Step 3 — 4-way comparison (original/MSE/Huber/CLEF)
 │   ├── sanity_check.py             # Quick end-to-end test (~2 min)
 │   └── setup_clef.py               # Clone + patch + install CLEF
 ├── run_cv.py                       # Steps 2 & 4 — main CV entry point
@@ -255,8 +260,11 @@ Final_Project/
 
 **ReHeartNet** — Densely-Connected Bidirectional LSTM (Lee et al. 2026):
 
+> Input length varies by model variant: original/Huber use **(B, 500, 1)** [4 s @ 125 Hz];
+> CLEF variant uses **(B, 1250, 1)** [10 s @ 125 Hz]. The BiLSTM is sequence-length agnostic.
+
 ```
-PPG input  (B, 1250, 1)      [10 s @ 125 Hz, z-scored]
+PPG input  (B, L, 1)         [L=500 for 4 s models; L=1250 for CLEF model]
     ↓
 BiLSTM Block 1  (hidden=H)   → 2H-dim output
     ↓  dense: [input(1) + B1(2H)] = (1+2H)-dim input to next
@@ -266,7 +274,7 @@ BiLSTM Block 3 ... Block 5
     ↓  concatenate all features: (1 + 5×2H)-dim = 641-dim  [at H=64]
 Linear head  →  1 scalar per timestep
     ↓
-ECG output  (B, 1250, 1)     [reconstructed Lead II]
+ECG output  (B, L, 1)        [reconstructed Lead II, same length as input]
 ```
 
 > **Note on hidden size H:** Lee et al. defer exact hyperparameters to supplementary.
@@ -324,6 +332,12 @@ All metrics computed on held-out test subjects per fold. Reported as **mean ± 9
 clinical feature scores (sigmoid-activated). BCE between real and reconstructed scores measures
 diagnostic consistency in CLEF's clinically-supervised feature space. No PTB-XL data needed.
 
+`CLEFClassifier` requires **10 s input** (it resamples to 5000 samples at 500 Hz internally).
+For 4 s models (original/MSE/Huber), BCE is evaluated on a **separate 10 s test DataLoader**
+built from the same held-out subjects — the BiLSTM is sequence-length agnostic so the trained
+model runs on 10 s PPG windows at eval time. PRD, Pearson r, EMD, KS, and Beat MAE are still
+evaluated on 4 s windows consistent with training.
+
 R-peaks detected with `neurokit2.ecg_peaks()` (Pan-Tompkins). Windows with <3 peaks skipped.
 
 ---
@@ -332,7 +346,7 @@ R-peaks detected with `neurokit2.ecg_peaks()` (Pan-Tompkins). Windows with <3 pe
 
 **8-fold group CV** — `KFold(n_splits=8, shuffle=True, random_state=42)` at subject level:
 
-- ~46 training subjects, ~7 test subjects per fold (~658 test windows)
+- ~46 training subjects, ~7 test subjects per fold (~840 windows at 4 s / ~665 windows at 10 s)
 - Fresh `ReHeartNet` per fold — no leakage between folds
 - Phase alignment (PPG→ECG cross-correlation) applied to **training windows only**
 - Fold assignments saved to `results/fold_assignments.json` (reproducible)
@@ -372,8 +386,11 @@ simultaneous ECG + PPG at 125 Hz, ~8 minutes each.
 **Preprocessing pipeline** (`src/preprocessing.py`):
 1. Load Lead II (ECG) and PLETH (PPG) by **channel name** — order varies per subject
 2. Z-score normalise over the full recording
-3. Segment into 10 s windows with 50% overlap → **~95 windows/subject**
-4. Phase-align PPG to ECG via cross-correlation (training windows only)
+3. Optionally apply FIR bandpass filter: ECG 0.5–55 Hz, PPG 0.5–10 Hz (Lee et al. original only)
+4. Segment into fixed-length windows:
+   - **Original / our MSE / our Huber**: 4 s (500 samples), no overlap, FIR bandpass → **~120 windows/subject**
+   - **Our CLEF model**: 10 s (1250 samples), 50% overlap, z-score only → **~95 windows/subject**
+5. Phase-align PPG to ECG via cross-correlation (training windows only)
 
 ---
 

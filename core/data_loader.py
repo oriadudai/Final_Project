@@ -25,11 +25,23 @@ class BIDMCDataset(Dataset):
         return self.ppg[idx], self.ecg[idx]
 
 
-def _load_subjects(subjects: List[str], apply_align: bool) -> Tuple[np.ndarray, np.ndarray]:
+def _load_subjects(
+    subjects: List[str],
+    apply_align: bool,
+    window_sec: float = None,
+    overlap_frac: float = 0.5,
+    apply_bandpass: bool = False,
+) -> Tuple[np.ndarray, np.ndarray]:
     """Concatenate windows from multiple subjects into single arrays."""
     all_ppg, all_ecg = [], []
     for subj in subjects:
-        ppg_w, ecg_w = build_subject_windows(subj, apply_phase_align=apply_align)
+        ppg_w, ecg_w = build_subject_windows(
+            subj,
+            apply_phase_align=apply_align,
+            window_sec=window_sec,
+            overlap_frac=overlap_frac,
+            apply_bandpass=apply_bandpass,
+        )
         all_ppg.append(ppg_w)
         all_ecg.append(ecg_w)
     return np.concatenate(all_ppg, axis=0), np.concatenate(all_ecg, axis=0)
@@ -39,15 +51,29 @@ def build_group_fold(
     train_subjects: List[str],
     test_subjects: List[str],
     apply_align: bool = True,
+    window_sec: float = None,
+    overlap_frac: float = 0.5,
+    apply_bandpass: bool = False,
 ) -> Tuple[BIDMCDataset, BIDMCDataset]:
     """Build train and test datasets for one CV fold.
 
     Phase alignment is applied to training subjects only; test data is never
     aligned (alignment would require ECG at inference time, which defeats the
     purpose of the reconstruction task).
+
+    Args:
+        window_sec:    Window length in seconds (None → config default 10 s).
+        overlap_frac:  Window overlap fraction (0.0 = non-overlapping).
+        apply_bandpass: Apply FIR bandpass pre-filter (ECG 0.5–55 Hz, PPG 0.5–10 Hz).
     """
-    train_ppg, train_ecg = _load_subjects(train_subjects, apply_align=apply_align)
-    test_ppg,  test_ecg  = _load_subjects(test_subjects,  apply_align=False)
+    train_ppg, train_ecg = _load_subjects(
+        train_subjects, apply_align=apply_align,
+        window_sec=window_sec, overlap_frac=overlap_frac, apply_bandpass=apply_bandpass,
+    )
+    test_ppg, test_ecg = _load_subjects(
+        test_subjects, apply_align=False,
+        window_sec=window_sec, overlap_frac=overlap_frac, apply_bandpass=apply_bandpass,
+    )
     return BIDMCDataset(train_ppg, train_ecg), BIDMCDataset(test_ppg, test_ecg)
 
 
@@ -74,6 +100,51 @@ def get_cv_splits(
         assignments[f"fold_{fold_idx:02d}"] = {
             "train": train_subs,
             "test":  test_subs,
+        }
+
+    save_dir = os.path.dirname(save_path)
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+    with open(save_path, "w") as f:
+        json.dump(assignments, f, indent=2)
+
+    return splits
+
+
+def build_test_dataset(
+    test_subjects: List[str],
+    window_sec: float = None,
+    overlap_frac: float = 0.5,
+    apply_bandpass: bool = False,
+) -> BIDMCDataset:
+    """Build a test-only dataset without requiring a paired training set."""
+    test_ppg, test_ecg = _load_subjects(
+        test_subjects, apply_align=False,
+        window_sec=window_sec, overlap_frac=overlap_frac,
+        apply_bandpass=apply_bandpass,
+    )
+    return BIDMCDataset(test_ppg, test_ecg)
+
+
+def get_loso_splits(
+    all_subjects: List[str],
+    save_path: str = "results/loso_assignments.json",
+) -> List[Tuple[List[str], List[str]]]:
+    """Leave-One-Subject-Out splits: each fold holds out exactly one subject.
+
+    For BIDMC (53 subjects) this produces 53 folds, giving an unbiased
+    subject-level evaluation with maximum training data per fold.
+
+    Returns list of (train_subjects, [test_subject]) tuples.
+    """
+    splits = []
+    assignments = {}
+    for fold_idx, test_subj in enumerate(all_subjects):
+        train_subs = [s for s in all_subjects if s != test_subj]
+        splits.append((train_subs, [test_subj]))
+        assignments[f"fold_{fold_idx:02d}"] = {
+            "train": train_subs,
+            "test":  [test_subj],
         }
 
     save_dir = os.path.dirname(save_path)

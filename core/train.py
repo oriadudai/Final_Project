@@ -1,5 +1,5 @@
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -70,10 +70,11 @@ def train_fold(
     hidden_size: int = config.HIDDEN_SIZE,
     checkpoint_dir: str = config.CHECKPOINT_DIR,
     use_wandb: bool = True,
-    early_stop_patience: int = 15,
+    early_stop_patience: Optional[int] = 15,
     lr_patience: int = 10,
     model_name: str = "reheartnet",
     loss_type:  str = "clef",
+    lr_schedule: str = "plateau",
 ) -> Tuple[nn.Module, Dict[str, List[float]]]:
     """Train a model for one CV fold.
 
@@ -94,13 +95,18 @@ def train_fold(
         hidden_size:     BiLSTM hidden units per direction.
         checkpoint_dir:  Directory for saving best-model checkpoints.
         use_wandb:       Whether to log metrics to Weights & Biases.
-        early_stop_patience: Epochs without val improvement before stopping.
+        early_stop_patience: Epochs without improvement before early stopping.
+                         None disables early stopping entirely (runs all epochs).
         lr_patience:     Epochs without val improvement before halving LR.
+                         Only used when lr_schedule="plateau".
         model_name:      Architecture to train: "reheartnet", "linear", "lstm",
                          or "bilstm" (see core.models.baselines.get_model).
-        loss_type:       "clef"  → Huber + CLEF perceptual loss (default, our method)
-                         "huber" → Huber only (lambda_clinical forced to 0)
-                         "mse"   → Plain MSE, no Huber, no CLEF (original ReHeartNet)
+        loss_type:       "clef"  → Huber + CLEF perceptual loss (our method)
+                         "huber" → Huber only
+                         "mse"   → Plain MSE (original ReHeartNet)
+        lr_schedule:     "plateau"      → ReduceLROnPlateau (our default)
+                         "linear_decay" → multiply by 0.75 every 50 epochs
+                                          (matches Lee et al. original setup)
 
     Returns:
         (trained_model, loss_history) where loss_history is a dict with
@@ -122,9 +128,15 @@ def train_fold(
         # Default: Huber + CLEF perceptual loss
         criterion = ClinicalCompositeLoss(clef_encoder, lambda_clinical, huber_delta)
     optimizer = optim.Adam(model.parameters(), lr=lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=lr_patience
-    )
+    if lr_schedule == "linear_decay":
+        # Multiply LR by 0.75 every 50 epochs — matches Lee et al. original setup
+        scheduler = optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=lambda epoch: 0.75 ** (epoch // 50)
+        )
+    else:
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=lr_patience
+        )
 
     run_name = f"{model_name}_fold_{fold_idx:02d}"
     if use_wandb and WANDB_AVAILABLE:
@@ -134,6 +146,7 @@ def train_fold(
             config={
                 "model": model_name,
                 "loss_type": loss_type,
+                "lr_schedule": lr_schedule,
                 "fold": fold_idx,
                 "test_subjects": fold_subjects,
                 "lr": lr,
@@ -156,7 +169,10 @@ def train_fold(
         history["train"].append(train_loss)
         history["val"].append(val_loss)
 
-        scheduler.step(val_loss)
+        if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(val_loss)
+        else:
+            scheduler.step()
 
         print(
             f"[Fold {fold_idx:02d} | Epoch {epoch:03d}/{epochs}] "
@@ -186,7 +202,7 @@ def train_fold(
             }, ckpt_path)
         else:
             no_improve += 1
-            if no_improve >= early_stop_patience:
+            if early_stop_patience is not None and no_improve >= early_stop_patience:
                 print(f"  Early stopping at epoch {epoch} (no improvement for {early_stop_patience} epochs)")
                 break
 
