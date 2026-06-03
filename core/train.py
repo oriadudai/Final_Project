@@ -23,10 +23,13 @@ def train_one_epoch(
     criterion: nn.Module,
     optimizer: optim.Optimizer,
     device: torch.device,
-) -> float:
-    """Run one training epoch. Returns average batch loss."""
+) -> Dict[str, float]:
+    """Run one training epoch. Returns dict with 'loss' and optional components."""
     model.train()
-    running_loss = 0.0
+    running_loss   = 0.0
+    running_huber  = 0.0
+    running_clef   = 0.0
+    n_batches      = len(dataloader)
     for ppg, ecg in dataloader:
         ppg, ecg = ppg.to(device), ecg.to(device)
         optimizer.zero_grad()
@@ -35,7 +38,16 @@ def train_one_epoch(
         loss.backward()
         optimizer.step()
         running_loss += loss.item()
-    return running_loss / len(dataloader)
+        # Collect CLEF composite loss components if available
+        if hasattr(criterion, "last_huber_loss"):
+            running_huber += criterion.last_huber_loss
+            running_clef  += criterion.last_clef_loss
+
+    result = {"loss": running_loss / n_batches}
+    if running_huber > 0:
+        result["huber_loss"] = running_huber / n_batches
+        result["clef_loss"]  = running_clef  / n_batches
+    return result
 
 
 def validate(
@@ -70,11 +82,12 @@ def train_fold(
     hidden_size: int = config.HIDDEN_SIZE,
     checkpoint_dir: str = config.CHECKPOINT_DIR,
     use_wandb: bool = True,
-    early_stop_patience: Optional[int] = 15,
-    lr_patience: int = 10,
+    wandb_kwargs: Optional[dict] = None,
+    early_stop_patience: Optional[int] = None,  # paper: run all epochs; set int to enable
+    lr_patience: int = 10,                       # only used when lr_schedule="plateau"
     model_name: str = "reheartnet",
     loss_type:  str = "clef",
-    lr_schedule: str = "plateau",
+    lr_schedule: str = "linear_decay",   # paper default: ×0.75 every 50 epochs
 ) -> Tuple[nn.Module, Dict[str, List[float]]]:
     """Train a model for one CV fold.
 
@@ -104,9 +117,9 @@ def train_fold(
         loss_type:       "clef"  → Huber + CLEF perceptual loss (our method)
                          "huber" → Huber only
                          "mse"   → Plain MSE (original ReHeartNet)
-        lr_schedule:     "plateau"      → ReduceLROnPlateau (our default)
-                         "linear_decay" → multiply by 0.75 every 50 epochs
-                                          (matches Lee et al. original setup)
+        lr_schedule:     "linear_decay" → multiply by 0.75 every 50 epochs
+                                          (paper default; used by all current models)
+                         "plateau"      → ReduceLROnPlateau (non-default, adaptive option)
 
     Returns:
         (trained_model, loss_history) where loss_history is a dict with
@@ -140,8 +153,11 @@ def train_fold(
 
     run_name = f"{model_name}_fold_{fold_idx:02d}"
     if use_wandb and WANDB_AVAILABLE:
+        _wkw = wandb_kwargs or {}
         wandb.init(
-            project="ppg2ecg-reheartnet",
+            project=_wkw.get("project", "ppg2ecg-reheartnet"),
+            entity=_wkw.get("entity", None),
+            group=_wkw.get("group", None),    # groups all folds of the same model variant
             name=run_name,
             config={
                 "model": model_name,
@@ -163,7 +179,8 @@ def train_fold(
     history: Dict[str, List[float]] = {"train": [], "val": []}
 
     for epoch in range(1, epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        train_info = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss = train_info["loss"]
         val_loss   = validate(model, val_loader, criterion, device)
 
         history["train"].append(train_loss)
@@ -180,12 +197,75 @@ def train_fold(
         )
 
         if use_wandb and WANDB_AVAILABLE:
-            wandb.log({
-                "fold": fold_idx,
-                "epoch": epoch,
+            log_dict = {
+                "fold":       fold_idx,
+                "epoch":      epoch,
                 "train_loss": train_loss,
-                "val_loss": val_loss,
-            })
+                "val_loss":   val_loss,
+                "lr":         optimizer.param_groups[0]["lr"],
+            }
+            import numpy as _np  # noqa: PLC0415  (needed by both blocks below)
+            # Loss components (CLEF model only)
+            if "huber_loss" in train_info:
+                log_dict["loss/huber"]  = train_info["huber_loss"]
+                log_dict["loss/clef"]   = train_info["clef_loss"]
+            # Every 100 epochs: log a visual ECG reconstruction image
+            if (epoch % 100 == 0 or epoch == epochs) and epoch > 0:
+                import matplotlib  # noqa: PLC0415
+                matplotlib.use("Agg")
+                import matplotlib.pyplot as _plt  # noqa: PLC0415
+                model.eval()
+                ppg_s, ecg_s = next(iter(val_loader))
+                with torch.no_grad():
+                    pred_s = model(ppg_s[:2].to(device)).squeeze(-1).cpu().numpy()
+                true_s = ecg_s[:2].squeeze(-1).numpy()
+                n_show = min(2, len(true_s))
+                fig, axes = _plt.subplots(n_show, 1, figsize=(10, 3 * n_show))
+                if n_show == 1:
+                    axes = [axes]
+                fs = 125
+                for i in range(n_show):
+                    t = _np.linspace(0, len(true_s[i]) / fs, len(true_s[i]))
+                    axes[i].plot(t, true_s[i],  color="#1f77b4", lw=1.2, alpha=0.8, label="GT")
+                    axes[i].plot(t, pred_s[i],  color="#d45f0e", lw=0.9, alpha=0.8,
+                                 linestyle="--", label="Pred")
+                    denom = float((true_s[i] ** 2).sum())
+                    prd_i = _np.sqrt(((true_s[i] - pred_s[i]) ** 2).sum() / denom) * 100 \
+                            if denom > 1e-12 else float("nan")
+                    axes[i].set_title(f"Val window {i+1}  |  PRD={prd_i:.1f}%",
+                                      fontsize=9)
+                    axes[i].legend(fontsize=8)
+                    axes[i].set_xlabel("Time (s)", fontsize=8)
+                    axes[i].tick_params(labelsize=7)
+                fig.suptitle(f"Fold {fold_idx:02d} | Epoch {epoch}", fontsize=10)
+                _plt.tight_layout()
+                log_dict["reconstruction"] = wandb.Image(fig)
+                _plt.close(fig)
+                model.train()
+
+            # Every 50 epochs: quick PRD + Pearson r on val set.
+            # No CLEF encoder, no R-peak detection — fast enough to run every 50 epochs.
+            if epoch % 50 == 0 or epoch == epochs:
+                import numpy as _np  # noqa: PLC0415
+                model.eval()
+                t_all, p_all = [], []
+                with torch.no_grad():
+                    for ppg_v, ecg_v in val_loader:
+                        p_all.append(model(ppg_v.to(device)).squeeze(-1).cpu().numpy())
+                        t_all.append(ecg_v.squeeze(-1).numpy())
+                t_cat = _np.concatenate(t_all).ravel()
+                p_cat = _np.concatenate(p_all).ravel()
+                denom = float((t_cat ** 2).sum())
+                prd_live = float(_np.sqrt(((t_cat - p_cat) ** 2).sum() / denom) * 100) \
+                           if denom > 1e-12 else float("nan")
+                r_live   = float(_np.corrcoef(t_cat, p_cat)[0, 1]) \
+                           if t_cat.std() > 1e-8 and p_cat.std() > 1e-8 else float("nan")
+                rmse_live = float(_np.sqrt(_np.mean((t_cat - p_cat) ** 2)))
+                log_dict["val_rmse"]      = rmse_live
+                log_dict["val_prd"]       = prd_live
+                log_dict["val_pearson_r"] = r_live
+                model.train()
+            wandb.log(log_dict)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss

@@ -103,7 +103,13 @@ class ClinicalCompositeLoss(nn.Module):
         phi_pred = self.clef_encoder(self._to_clef_input(pred_ecg))
 
         clinical_loss = torch.mean((phi_true - phi_pred) ** 2)
-        return huber_loss + self.lambda_clinical * clinical_loss
+        total = huber_loss + self.lambda_clinical * clinical_loss
+
+        # Expose components so callers can log them to wandb
+        self.last_huber_loss    = float(huber_loss.detach())
+        self.last_clef_loss     = float((self.lambda_clinical * clinical_loss).detach())
+
+        return total
 
 
 if __name__ == "__main__":

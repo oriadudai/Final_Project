@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 import core.config as config
 from core.models.reheartnet import ReHeartNet
 from core.metrics.clinical_metrics import (
+    compute_rmse,
     compute_prd,
     compute_bce,
     compute_emd,
@@ -86,13 +87,15 @@ def evaluate_fold(
             pearson_vals.append(float(np.corrcoef(t, p)[0, 1]))
     pearson_r = float(np.mean(pearson_vals)) if pearson_vals else float("nan")
 
-    prd     = compute_prd(true_arr, pred_arr)
-    bce     = compute_bce(true_arr, pred_arr, classifier, device)
-    emd     = compute_emd(true_arr, pred_arr, fs=fs)
+    rmse     = compute_rmse(true_arr, pred_arr)
+    prd      = compute_prd(true_arr, pred_arr)
+    bce      = compute_bce(true_arr, pred_arr, classifier, device)
+    emd      = compute_emd(true_arr, pred_arr, fs=fs)
     ks_stat, ks_pval = compute_ks(true_arr, pred_arr, fs=fs)
     beat_mae = compute_beat_timing_mae(true_arr, pred_arr, fs=fs)
 
     return {
+        "rmse":            rmse,
         "prd":             prd,
         "pearson_r":       pearson_r,
         "bce":             bce,

@@ -6,8 +6,33 @@ Built on **Lee et al. (2026)**, extended with:
 - **Huber loss** replacing MSE — robust to QRS transients
 - **CLEF perceptual loss** — frozen ECG foundation model (Nokia Bell Labs) enforces clinical feature consistency during training
 - **8-fold group cross-validation** — subject-disjoint, ~7 test subjects per fold
-- **Optuna hyperparameter search** — tunes lr, λ, δ, hidden size (batch size is paper-specified)
+- **Optuna hyperparameter search** — tunes λ, δ, hidden size
 - **Clinical evaluation metrics** — PRD, BCE (via CLEF features), EMD, KS test on RR intervals
+
+---
+
+## Before the Full GPU Run — Checklist
+
+- [ ] `data/BIDMC/` contains all 53 subjects (bidmc01–bidmc53 `.dat`/`.hea` pairs)
+- [ ] `models/clef/clef_medium.ckpt` downloaded (368 MB — used automatically on GPU)
+- [ ] `results/best_hyperparams.json` exists (run Step 1 first, or leave for config defaults)
+- [ ] GPU confirmed: `python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"`
+- [ ] Conda env activated: `conda activate reheartnet`
+
+**CLEF model size is auto-selected:** `"medium"` on GPU (better clinical features, 1024-dim embeddings), `"small"` on CPU. Pass `--clef-size small` to override.
+
+**Full run commands (GPU) — path and size are auto-detected:**
+```bash
+# Step 1 — Optuna tuning
+python scripts/tune_hyperparams.py --full
+
+# Step 3 — 3-way comparison (main paper experiment)
+python scripts/compare_reheartnet.py --no-wandb
+
+# Step 2 — main model CV (optional)
+python run_cv.py --no-wandb
+```
+On CPU, all scripts auto-select `clef_small.ckpt`; on GPU they auto-select `clef_medium.ckpt` from `models/clef/`.
 
 ---
 
@@ -68,17 +93,18 @@ If skipped, `run_cv.py` uses the defaults in `core/config.py`.
 
 ```bash
 # ~15-20 min (recommended first run)
-python scripts/tune_hyperparams.py --clef-path models/clef/clef_small.ckpt --fast
+python scripts/tune_hyperparams.py --fast
 
 # ~45-60 min (better coverage)
-python scripts/tune_hyperparams.py --clef-path models/clef/clef_small.ckpt
+python scripts/tune_hyperparams.py
 
 # ~4-8 h (full search)
-python scripts/tune_hyperparams.py --clef-path models/clef/clef_small.ckpt --full
+python scripts/tune_hyperparams.py --full
 
 # Resume a previous study
-python scripts/tune_hyperparams.py --clef-path models/clef/clef_small.ckpt --resume
+python scripts/tune_hyperparams.py --resume
 ```
+> `--clef-path` and `--clef-size` are auto-detected (medium on GPU, small on CPU). Override with e.g. `--clef-size small`.
 
 **What Optuna searches** (4 hyperparameters — batch size is paper-specified = 1):
 
@@ -115,17 +141,15 @@ Reads `results/best_hyperparams.json` automatically if Step 1 was run.
 
 ```bash
 # Standard run
-python run_cv.py --clef-path models/clef/clef_small.ckpt
-
-# Without wandb
-python run_cv.py --clef-path models/clef/clef_small.ckpt --no-wandb
+python run_cv.py --no-wandb
 
 # Resume after crash (restart from fold 3)
-python run_cv.py --clef-path models/clef/clef_small.ckpt --resume-fold 3
+python run_cv.py --no-wandb --resume-fold 3
 
-# Sanity check: 2 folds, 2 epochs each (~5 min)
-python run_cv.py --clef-path models/clef/clef_small.ckpt --dry-run --no-wandb
+# Sanity check: 2 folds, 2 epochs each
+python run_cv.py --dry-run --no-wandb
 ```
+> Path/size auto-detected. Override: `--clef-path models/clef/clef_small.ckpt --clef-size small`
 
 **Outputs** → `results/`
 
@@ -158,19 +182,29 @@ protocol as Lee et al. — only the loss function changes:
 > `reheartnet_clef` uses 10 s windows because the CLEF encoder requires 10 s input (see BCE note below).
 
 ```bash
-python scripts/compare_reheartnet.py --clef-path models/clef/clef_small.ckpt
+python scripts/compare_reheartnet.py --no-wandb
 
-# Resume / dry-run
-python scripts/compare_reheartnet.py --clef-path models/clef/clef_small.ckpt --resume
-python scripts/compare_reheartnet.py --clef-path models/clef/clef_small.ckpt --dry-run
+# Resume from partial results
+python scripts/compare_reheartnet.py --no-wandb --resume
+
+# Dry-run: 2 folds, 5 epochs, 5 subjects — ~12-15 min on CPU, shows emerging trends
+python scripts/compare_reheartnet.py --dry-run --no-wandb
 ```
+> Path/size auto-detected. Override: `--clef-path models/clef/clef_small.ckpt --clef-size small`
 
 **Outputs** → `results/comparison_reheartnet/`
 
 | File | Description |
 |------|-------------|
-| `comparison.json` | Side-by-side mean ± CI, all three variants |
-| `figures/comparison_panel.png` | **Main comparison figure** (2×3 panel, all 6 metrics) |
+| `results_report.txt` | **Human-readable table + per-fold breakdown** (open in any editor) |
+| `per_fold_results.json` | Flat JSON — one entry per fold per model (easy to parse) |
+| `comparison.json` | Full nested JSON — mean ± CI for every metric |
+| `figures/comparison_table.tex` | **LaTeX table — paste directly into paper** |
+| `figures/paper_reconstruction.png` | **GT + all models overlaid** (paper-grade figure) |
+| `figures/comparison_panel.png` | 2×4 bar panel — all 7 metrics with 95% CI |
+| `figures/delta_improvement.png` | Signed Δ_Huber and Δ_CLEF per metric |
+| `figures/per_fold_boxes.png` | Box plots — per-fold distribution per model |
+| `figures/rr_kde_comparison.png` | RR interval KDE — all models overlaid |
 | `figures/cmp_{metric}.png` | Per-metric bar chart (green outline = best) |
 | `summary_reheartnet_{original,huber,clef}.json` | Per-variant summaries |
 
@@ -320,12 +354,16 @@ All metrics computed on held-out test subjects per fold. Reported as **mean ± 9
 
 | Metric | Description | Direction | Implementation |
 |--------|-------------|-----------|----------------|
-| **PRD** | % Root Mean Square Difference | ↓ lower | `compute_prd()` |
+| **RMSE** | Root Mean Square Error (z-scored units) | ↓ lower | `compute_rmse()` |
+| **PRD** | % Root Mean Square Difference (normalised) | ↓ lower | `compute_prd()` |
 | **Pearson r** | Waveform correlation | ↑ higher | `compute_pearson_r()` |
 | **BCE** | Consistency in CLEF clinical feature space | ↓ lower | `CLEFClassifier` + `compute_bce()` |
 | **EMD** | Wasserstein-1 on RR interval distributions | ↓ lower | `compute_emd()` |
 | **KS stat** | KS test D-statistic on RR interval CDFs | ↓ lower | `compute_ks()` |
 | **Beat MAE** | Mean absolute R-peak timing error (s) | ↓ lower | `compute_beat_timing_mae()` |
+
+> **RMSE note:** computed on z-scored signals (normalised units, not mV). For comparison with Lee et al. Table I (mV), see the literature table in the report which accounts for the unit difference.
+> **Pearson r** is the only metric where **higher is better**.
 
 **BCE note:** Uses `CLEFClassifier` — the frozen CLEF encoder maps each ECG window to 256-dim
 clinical feature scores (sigmoid-activated). BCE between real and reconstructed scores measures
@@ -360,14 +398,14 @@ R-peaks detected with `neurokit2.ecg_peaks()` (Pan-Tompkins). Windows with <3 pe
 # ── Confirmed in Lee et al. (2026) supplementary ──────────────────────────
 FS              = 125       # BIDMC native sampling rate (Hz)
 NUM_BLOCKS      = 5         # 5 stacked DC-BiLSTM blocks
-BATCH_SIZE      = 1         # paper-specified; not tuned by Optuna
-LEARNING_RATE   = 1e-2      # paper-specified initial lr (linear-decay schedule)
-EPOCHS          = 1000      # paper-specified training length (no early stopping)
+BATCH_SIZE      = 1         # paper-specified; used by run_cv.py and compare_reheartnet.py
+LEARNING_RATE   = 1e-2      # paper-specified; Optuna searches [1e-4, 1e-2]
+EPOCHS          = 1000      # paper-specified; early stopping may exit earlier
 
-# ── Not in paper — our defaults ───────────────────────────────────────────
-SEQ_LEN         = 1250      # default window = 10 s × 125 Hz (CLEF model)
-                            # compare_reheartnet.py overrides to 500 (4 s) for
-                            # original and Huber variants
+# ── Not specified in paper — our defaults ─────────────────────────────────
+SEQ_LEN         = 1250      # 10 s × 125 Hz (CLEF model default)
+                            # compare_reheartnet.py overrides to 500 (4 s)
+                            # for original and Huber variants
 HIDDEN_SIZE     = 64        # BiLSTM hidden units per direction  [Optuna: 32/64/128]
 
 # ── Our contributions (not in original paper) ─────────────────────────────

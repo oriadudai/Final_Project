@@ -56,8 +56,9 @@ _METRICS    = ["prd", "pearson_r", "bce", "emd", "ks_stat", "beat_timing_mae"]
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="ReHeartNet 8-fold CV training and evaluation")
-    p.add_argument("--clef-path",        type=str, required=True, help="Path to CLEF .ckpt")
-    p.add_argument("--clef-size",        type=str, default="small", choices=["small","medium","large"])
+    p.add_argument("--clef-path",        type=str, default=None,  help="Path to CLEF .ckpt (auto-constructed if omitted)")
+    p.add_argument("--clef-dir",         type=str, default=config.CLEF_CHECKPOINT_DIR)
+    p.add_argument("--clef-size",        type=str, default="auto",  choices=["auto","small","medium","large"])
     p.add_argument("--classifier-path",  type=str, default=None, help="Path to PTB-XL classifier .pt")
     p.add_argument("--output-dir",       type=str, default="results")
     p.add_argument("--n-folds",          type=int, default=8)
@@ -66,6 +67,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--resume-fold",      type=int, default=0, help="Start from fold index (0-based)")
     p.add_argument("--dry-run",          action="store_true", help="2 folds, 2 epochs each")
     p.add_argument("--no-wandb",         action="store_true")
+    p.add_argument("--wandb-project",    type=str, default="ppg2ecg-reheartnet")
+    p.add_argument("--wandb-entity",     type=str, default=None)
     p.add_argument(
         "--model", type=str, default="reheartnet",
         choices=_ALL_MODELS,
@@ -185,14 +188,25 @@ def _run_single_model(
             huber_delta     = huber_delta,
             hidden_size     = hidden_size,
             checkpoint_dir  = config.CHECKPOINT_DIR,
-            use_wandb       = not args.no_wandb,
-            model_name      = model_name,
+            use_wandb           = not args.no_wandb,
+            wandb_kwargs        = {"project": args.wandb_project, "entity": args.wandb_entity},
+            lr_schedule         = "linear_decay",   # paper protocol
+            early_stop_patience = None,             # paper: run all epochs
+            model_name          = model_name,
         )
 
         metrics = evaluate_fold(model, test_loader, ptbxl_clf, device, clef_encoder=clef_encoder)
         metrics["fold"]       = fold_idx
         metrics["subjects"]   = test_subs
         metrics["model_name"] = model_name
+
+        try:
+            import wandb as _wandb
+            if _wandb.run is not None:
+                _wandb.log({f"eval/{k}": v for k, v in metrics.items()
+                            if isinstance(v, float) and k != "ks_pvalue"})
+        except Exception:
+            pass
         fold_metrics.append(metrics)
 
         print(f"  PRD={metrics['prd']:.3f}  r={metrics['pearson_r']:.3f}  "
@@ -379,6 +393,13 @@ def main() -> None:
 
     device = config.DEVICE
     print(f"Device: {device}")
+
+    if args.clef_size == "auto":
+        args.clef_size = "medium" if device.type == "cuda" else "small"
+        print(f"CLEF size auto-selected: {args.clef_size}")
+    if args.clef_path is None:
+        args.clef_path = os.path.join(args.clef_dir, f"clef_{args.clef_size}.ckpt")
+        print(f"CLEF path auto-set: {args.clef_path}")
 
     # Build shared frozen models and splits ONCE (reused across all model runs)
     print(f"Loading CLEF encoder ({args.clef_size}) ...")

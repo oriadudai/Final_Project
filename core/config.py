@@ -41,14 +41,14 @@ NUM_BLOCKS = 5
 # =====================================================================
 # 🚀 היפר-פרמטרים של תהליך האימון (Training Hyperparameters)
 # =====================================================================
-# גודל ה-Batch
-BATCH_SIZE = 64
+# גודל ה-Batch — paper specifies 1; compare_reheartnet.py overrides to 1 via model_cfg
+BATCH_SIZE = 1
 
-# קצב הלמידה ההתחלתי (Learning Rate)
-LEARNING_RATE = 1e-3
+# קצב הלמידה ההתחלתי (Learning Rate) — paper specifies 1e-2; Optuna may find a better value
+LEARNING_RATE = 1e-2
 
-# מספר מחזורי האימון
-EPOCHS = 100
+# מספר מחזורי האימון — paper specifies 1000; early stopping kicks in before then
+EPOCHS = 1000
 
 # הגדרת התקן העיבוד (GPU/CPU)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

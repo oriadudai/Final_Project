@@ -76,19 +76,22 @@ def objective(trial: "optuna.Trial", epochs: int) -> float:
         test_loader  = DataLoader(test_ds,     batch_size=batch_size, shuffle=False, num_workers=0)
 
         model, _ = train_fold(
-            fold_idx       = fold_idx,
-            fold_subjects  = test_subs,
-            train_loader   = train_loader,
-            val_loader     = val_loader,
-            clef_encoder   = GLOBAL_CLEF_ENCODER,
-            device         = DEVICE,
-            epochs         = epochs,
-            lr             = lr,
-            lambda_clinical = lambda_clin,
-            huber_delta    = huber_delta,
-            hidden_size    = hidden_size,
-            checkpoint_dir = os.path.join("results", "tune_checkpoints"),
-            use_wandb      = False,
+            fold_idx            = fold_idx,
+            fold_subjects       = test_subs,
+            train_loader        = train_loader,
+            val_loader          = val_loader,
+            clef_encoder        = GLOBAL_CLEF_ENCODER,
+            device              = DEVICE,
+            epochs              = epochs,
+            lr                  = lr,
+            lambda_clinical     = lambda_clin,
+            huber_delta         = huber_delta,
+            hidden_size         = hidden_size,
+            checkpoint_dir      = os.path.join("results", "tune_checkpoints"),
+            use_wandb           = False,
+            loss_type           = "clef",           # tune the full CLEF objective
+            lr_schedule         = "linear_decay",   # paper protocol
+            early_stop_patience = None,             # run full epochs for fair comparison
         )
 
         metrics = evaluate_fold(model, test_loader, GLOBAL_PTBXL_CLF, DEVICE)
@@ -107,8 +110,9 @@ def objective(trial: "optuna.Trial", epochs: int) -> float:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Optuna hyperparameter search for ReHeartNet")
-    parser.add_argument("--clef-path",        type=str, required=True, help="Path to CLEF .ckpt file")
-    parser.add_argument("--clef-size",        type=str, default="small", choices=["small","medium","large"])
+    parser.add_argument("--clef-path",        type=str, default=None,  help="Path to CLEF .ckpt (auto-constructed if omitted)")
+    parser.add_argument("--clef-dir",         type=str, default=config.CLEF_CHECKPOINT_DIR)
+    parser.add_argument("--clef-size",        type=str, default="auto",  choices=["auto","small","medium","large"])
     parser.add_argument("--classifier-path",  type=str, default=None, help="Path to PTB-XL classifier .pt")
     parser.add_argument("--n-trials",         type=int, default=None, help="Override trial count")
     parser.add_argument("--epochs",           type=int, default=None, help="Override epochs per trial")
@@ -149,6 +153,12 @@ def main() -> None:
 
     # Build shared models once
     global GLOBAL_CLEF_ENCODER, GLOBAL_PTBXL_CLF
+    if args.clef_size == "auto":
+        args.clef_size = "medium" if DEVICE.type == "cuda" else "small"
+        print(f"CLEF size auto-selected: {args.clef_size}")
+    if args.clef_path is None:
+        args.clef_path = os.path.join(args.clef_dir, f"clef_{args.clef_size}.ckpt")
+        print(f"CLEF path auto-set: {args.clef_path}")
     print(f"Loading CLEF encoder ({args.clef_size}) from {args.clef_path} ...")
     GLOBAL_CLEF_ENCODER = load_clef_encoder(args.clef_path, args.clef_size, DEVICE)
     GLOBAL_PTBXL_CLF    = get_ptbxl_classifier(args.classifier_path).to(DEVICE)

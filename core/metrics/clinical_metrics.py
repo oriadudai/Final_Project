@@ -76,6 +76,19 @@ def compute_confidence_interval(
 # Morphological metric
 # ---------------------------------------------------------------------------
 
+def compute_rmse(true: np.ndarray, pred: np.ndarray) -> float:
+    """Root Mean Square Error (RMSE).
+
+    RMSE = sqrt(mean((true - pred)^2))
+
+    Signals are z-scored, so units are normalised (not mV).
+    Lower is better.  Operates on flattened arrays.
+    """
+    true_flat = true.ravel().astype(np.float64)
+    pred_flat = pred.ravel().astype(np.float64)
+    return float(np.sqrt(np.mean((true_flat - pred_flat) ** 2)))
+
+
 def compute_prd(true: np.ndarray, pred: np.ndarray) -> float:
     """Percentage Root Mean Square Difference (PRD).
 
