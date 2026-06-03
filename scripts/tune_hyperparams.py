@@ -59,8 +59,8 @@ def objective(trial: "optuna.Trial", epochs: int) -> float:
     lr          = trial.suggest_float("lr",               1e-4, 1e-2, log=True)
     lambda_clin = trial.suggest_float("lambda_clinical",  1e-3, 1.0,  log=True)
     huber_delta = trial.suggest_float("huber_delta",      0.1,  2.0)
-    batch_size  = trial.suggest_categorical("batch_size", [32, 64, 128])
     hidden_size = trial.suggest_categorical("hidden_size", [32, 64, 128])
+    batch_size  = config.BATCH_SIZE   # paper-specified (=1); not tuned
 
     fold_prds = []
 
