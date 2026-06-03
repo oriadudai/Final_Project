@@ -1,62 +1,27 @@
 import os
 import torch
 
-# =====================================================================
-# 📂 הגדרות נתיבים (Paths)
-# =====================================================================
-# תיקיית המקור הכללית של הנתונים
 DATA_DIR = "data"
-
-# תיקייה לשמירת קבצי המשקולות וה-Checkpoints של המודל
 CHECKPOINT_DIR = "checkpoints"
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-
-
-# =====================================================================
-# 📊 פרמטרים של האות הרפואי (Signal Parameters)
-# =====================================================================
-# תדר הדגימה של אותות ה-PPG וה-ECG 
-FS = 125
-
-# אורך כל חלון/מקטע זמן בשניות
+#data parameters:
+FS = 125 #Sampling Rate
 WINDOW_SIZE = 10
-
-# אורך וקטור הכניסה למודל בפועל (125 כפול 10 = 1250)
 SEQ_LEN = FS * WINDOW_SIZE
-
-
-# =====================================================================
-# 🧠 היפר-פרמטרים של המודל (Model Hyperparameters)
-# =====================================================================
-# מספר ערוצי הקלט (ערוץ יחיד המייצג את אות ה-PPG)
+#Model Hyperparameters
 INPUT_CHANNELS = 1
+HIDDEN_SIZE = 64 # number if neurons in the BiLSTM
 
-# מספר הנוירונים בשכבות ה-BiLSTM
-HIDDEN_SIZE = 64
-
-# מספר הבלוקים של ה-DC-BiLSTM
+#  number of the DC blocks-BiLSTM
 NUM_BLOCKS = 5
-
-
-# =====================================================================
-# 🚀 היפר-פרמטרים של תהליך האימון (Training Hyperparameters)
-# =====================================================================
-# גודל ה-Batch
+# Training Hyperparameters:
 BATCH_SIZE = 64
-
-# קצב הלמידה ההתחלתי (Learning Rate)
 LEARNING_RATE = 1e-3
-
-# מספר מחזורי האימון
 EPOCHS = 100
-
-# הגדרת התקן העיבוד (GPU/CPU)
+#device setup
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-# =====================================================================
-# 🔍 הדפסת קונפיגורציה לבדיקה ראשונית
-# =====================================================================
+#printing the configuration for the first setup 
 if __name__ == "__main__":
     print("=== ReHeartNet Configuration Initialized ===")
     print(f"Signal Sequence Length: {SEQ_LEN} samples")
