@@ -13,8 +13,8 @@ dependencies:
     # CPU-only build (default). To use a GPU replace the two lines below with:
     #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
     # or cu121 / cu124 depending on your CUDA version.
+    - ./models/clef_repo
     - torch>=2.0.0
-    - torchvision>=0.15.0
 
     # ── Signal processing & biosignals ───────────────────────────────────────
     - numpy>=1.26.0
