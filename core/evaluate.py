@@ -12,7 +12,6 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 import core.config as config
-from core.models.reheartnet import ReHeartNet
 from core.metrics.clinical_metrics import (
     compute_rmse,
     compute_prd,
@@ -52,7 +51,7 @@ def _collect_predictions(
 
 
 def evaluate_fold(
-    model: ReHeartNet,
+    model: nn.Module,
     test_loader: DataLoader,
     ptbxl_classifier: nn.Module,
     device: torch.device,

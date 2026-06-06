@@ -47,7 +47,7 @@ from core.visualization.plots import (
 from src.preprocessing import get_all_record_names
 
 _ALL_MODELS = ["linear", "lstm", "bilstm", "reheartnet"]
-_METRICS    = ["prd", "pearson_r", "bce", "emd", "ks_stat", "beat_timing_mae"]
+_METRICS    = ["rmse", "prd", "pearson_r", "bce", "emd", "ks_stat", "beat_timing_mae"]
 
 
 # ---------------------------------------------------------------------------

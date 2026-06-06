@@ -262,7 +262,7 @@ def save_results_summary(
     os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
 
     if metric_names is None:
-        metric_names = ["prd", "pearson_r", "bce", "emd", "ks_stat", "ks_pvalue", "beat_timing_mae"]
+        metric_names = ["rmse", "prd", "pearson_r", "bce", "emd", "ks_stat", "ks_pvalue", "beat_timing_mae"]
 
     summary = {}
     for m in metric_names:

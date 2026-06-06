@@ -1,7 +1,8 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from scipy.signal import butter, sosfilt, resample
+import torch.nn.functional as F
+from scipy.signal import butter, sosfilt, resample, firwin
 
 
 def load_clef_encoder(ckpt_path: str, model_size: str = "small", device=None):
@@ -43,10 +44,18 @@ class ClinicalCompositeLoss(nn.Module):
     L_total = HuberLoss(pred, true) + lambda_clinical * ||Φ(true) - Φ(pred)||²
 
     Φ is a frozen pretrained CLEF encoder. The CLEF preprocessing pipeline
-    (resample 125→500 Hz, bandpass 0.67-40 Hz, per-window z-score) runs
-    inside _to_clef_input and is entirely separate from the main preprocessing
-    in src/preprocessing.py.
+    (resample 125→500 Hz, bandpass 0.67-40 Hz, per-window z-score) runs inside
+    this module and is entirely separate from the main preprocessing in
+    src/preprocessing.py.
+
+    For the pred path the preprocessing is implemented with differentiable PyTorch
+    ops (F.interpolate + F.conv1d with a pre-computed FIR kernel) so that gradients
+    flow from clinical_loss back through the CLEF encoder and into ReHeartNet.
+    The true path uses numpy/scipy (inside torch.no_grad()) for speed.
     """
+
+    # FIR bandpass parameters (500 Hz, 0.67–40 Hz), matching CLEF training conditions.
+    _FIR_NTAPS = 255   # odd → linear-phase; longer = sharper roll-off
 
     def __init__(
         self,
@@ -59,27 +68,63 @@ class ClinicalCompositeLoss(nn.Module):
         self.lambda_clinical = lambda_clinical
         self.huber = nn.HuberLoss(delta=huber_delta)
 
-        # Build Butterworth bandpass filter coefficients once (500 Hz, 0.67-40 Hz)
+        # IIR filter for the non-differentiable true path (500 Hz, 0.67–40 Hz)
         self._sos = butter(4, [0.67, 40.0], btype="band", fs=500, output="sos")
 
-    def _to_clef_input(self, x: torch.Tensor) -> torch.Tensor:
-        """Convert model-domain ECG tensor to CLEF-compatible input.
+        # FIR kernel for the differentiable pred path.
+        # Stored as a buffer so it moves to the correct device with .to(device).
+        fir_coeffs = firwin(
+            self._FIR_NTAPS, [0.67, 40.0], fs=500, pass_zero=False
+        ).astype(np.float32)
+        self.register_buffer(
+            "_fir_kernel",
+            torch.from_numpy(fir_coeffs).view(1, 1, -1),
+        )
 
-        Pipeline (separate from main preprocessing):
-          (B, 1250, 1) at 125 Hz
-          → resample to 5000 samples at 500 Hz (same 10-second window)
-          → bandpass 0.67-40 Hz at 500 Hz  (matches CLEF training conditions)
-          → per-window z-score              (CLEF requirement)
-          → (B, 1, 5000) float32 tensor
-        """
-        # Detach from graph (only phi_pred needs gradients; phi_true does not)
-        x_np = x.squeeze(-1).detach().cpu().numpy()          # (B, 1250)
-        r = resample(x_np, 5000, axis=1)                     # (B, 5000) @ 500 Hz
-        r = sosfilt(self._sos, r, axis=1)                    # bandpass
+    # ------------------------------------------------------------------
+    # Non-differentiable path (true ECG, always inside torch.no_grad())
+    # ------------------------------------------------------------------
+
+    def _to_clef_input_numpy(self, x: torch.Tensor) -> torch.Tensor:
+        """Numpy/scipy preprocessing — fast but not differentiable."""
+        x_np = x.squeeze(-1).detach().cpu().numpy()     # (B, 1250)
+        r = resample(x_np, 5000, axis=1)                # (B, 5000) @ 500 Hz
+        r = sosfilt(self._sos, r, axis=1)               # IIR bandpass
         mean = r.mean(axis=1, keepdims=True)
         std  = r.std(axis=1,  keepdims=True) + 1e-8
-        r = (r - mean) / std                                 # per-window z-score
+        r = (r - mean) / std                            # per-window z-score
         return torch.from_numpy(r.astype(np.float32)).unsqueeze(1).to(x.device)
+
+    # ------------------------------------------------------------------
+    # Differentiable path (pred ECG — gradients must reach ReHeartNet)
+    # ------------------------------------------------------------------
+
+    def _to_clef_input_diff(self, x: torch.Tensor) -> torch.Tensor:
+        """Differentiable preprocessing — gradients flow back to the model.
+
+        Uses F.interpolate for resampling and F.conv1d with a frozen FIR
+        kernel for bandpass filtering.  Both ops are tracked by autograd.
+
+          (B, 1250, 1) at 125 Hz
+          → squeeze  → (B, 1, 1250)
+          → F.interpolate  → (B, 1, 5000) @ 500 Hz
+          → FIR bandpass   → (B, 1, 5000)
+          → z-score        → (B, 1, 5000)
+        """
+        x = x.squeeze(-1).unsqueeze(1)                  # (B, 1, 1250)
+        x = F.interpolate(x, size=5000, mode="linear", align_corners=False)  # (B, 1, 5000)
+
+        # FIR conv1d — kernel is (1, 1, n_taps); "same" length via reflect padding
+        pad = self._FIR_NTAPS // 2
+        x = F.pad(x, (pad, pad), mode="reflect")
+        x = F.conv1d(x, self._fir_kernel)               # (B, 1, 5000)
+
+        mean = x.mean(dim=-1, keepdim=True)
+        std  = x.std(dim=-1,  keepdim=True) + 1e-8
+        x = (x - mean) / std                            # per-window z-score
+        return x                                         # (B, 1, 5000)
+
+    # ------------------------------------------------------------------
 
     def forward(
         self,
@@ -95,26 +140,27 @@ class ClinicalCompositeLoss(nn.Module):
         """
         huber_loss = self.huber(pred_ecg, true_ecg)
 
-        # Ground-truth features: no gradients needed through the encoder
+        # Ground-truth features: no gradients needed
         with torch.no_grad():
-            phi_true = self.clef_encoder(self._to_clef_input(true_ecg))
+            phi_true = self.clef_encoder(self._to_clef_input_numpy(true_ecg))
 
-        # Predicted features: gradients flow back into ReHeartNet through here
-        phi_pred = self.clef_encoder(self._to_clef_input(pred_ecg))
+        # Predicted features: differentiable path — gradients flow through
+        # F.interpolate → FIR conv1d → z-score → CLEF encoder → phi_pred
+        # and back into ReHeartNet parameters.
+        phi_pred = self.clef_encoder(self._to_clef_input_diff(pred_ecg))
 
         clinical_loss = torch.mean((phi_true - phi_pred) ** 2)
         total = huber_loss + self.lambda_clinical * clinical_loss
 
         # Expose components so callers can log them to wandb
-        self.last_huber_loss    = float(huber_loss.detach())
-        self.last_clef_loss     = float((self.lambda_clinical * clinical_loss).detach())
+        self.last_huber_loss = float(huber_loss.detach())
+        self.last_clef_loss  = float((self.lambda_clinical * clinical_loss).detach())
 
         return total
 
 
 if __name__ == "__main__":
     print("=== ClinicalCompositeLoss smoke test (random encoder) ===")
-    # Use a tiny random linear encoder as a stand-in for CLEF
     dummy_encoder = nn.Sequential(
         nn.Flatten(start_dim=1),
         nn.Linear(5000, 256),
@@ -123,7 +169,9 @@ if __name__ == "__main__":
         p.requires_grad = False
 
     criterion = ClinicalCompositeLoss(dummy_encoder)
-    pred = torch.randn(4, 1250, 1)
+    pred = torch.randn(4, 1250, 1, requires_grad=True)
     true = torch.randn(4, 1250, 1)
     loss = criterion(pred, true)
+    loss.backward()
     print(f"Loss: {loss.item():.4f}")
+    print(f"pred.grad is not None: {pred.grad is not None}")   # must be True
