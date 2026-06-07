@@ -165,6 +165,10 @@ def _parse_args() -> argparse.Namespace:
                    help="Stop a fold early after N epochs without val-loss improvement (paper default: None = run all epochs)")
     p.add_argument("--batch-size",      type=int, default=None)
     p.add_argument("--resume",          action="store_true", help="Resume from existing partial results")
+    p.add_argument("--only",            type=str, default=None,
+                   help="Comma-separated subset of model keys to run (e.g. 'reheartnet_clef'). "
+                        "Lets each loss variant be launched as its own process on its own GPU; "
+                        "rerun without --only (with --resume) afterward to assemble the comparison.")
     p.add_argument("--dry-run",         action="store_true", help="2 folds, 2 epochs each")
     p.add_argument("--no-wandb",        action="store_true")
     p.add_argument("--wandb-project",   type=str, default="ppg2ecg-reheartnet",
@@ -1104,9 +1108,17 @@ def main() -> None:
     )
 
     # -- Run all three model variants -----------------------------------------
+    selected = MODELS
+    if args.only:
+        keys = [k.strip() for k in args.only.split(",")]
+        unknown = [k for k in keys if k not in MODELS]
+        if unknown:
+            raise ValueError(f"Unknown model key(s) in --only: {unknown}. Valid keys: {list(MODELS)}")
+        selected = {k: MODELS[k] for k in keys}
+
     all_results = {}
     all_samples  = {}
-    for model_key, model_cfg in MODELS.items():
+    for model_key, model_cfg in selected.items():
         print(f"\n{'-'*60}")
         print(f"  Model : {model_cfg['label']}")
         print(f"{'-'*60}")
@@ -1116,6 +1128,11 @@ def main() -> None:
         )
         all_results[model_key] = fold_metrics
         all_samples[model_key]  = sample
+
+    if args.only:
+        print(f"\n--only was given ({list(selected)}); skipping comparison-output assembly. "
+              f"Rerun with --resume and no --only once all variants have completed to assemble the report.")
+        return
 
     # -- Comparison output ----------------------------------------------------
     print("\n" + "-"*60)
