@@ -64,6 +64,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--n-folds",          type=int, default=8)
     p.add_argument("--n-subjects",       type=int, default=None, help="Use only the first N BIDMC subjects (smoke testing)")
     p.add_argument("--epochs",           type=int, default=None)
+    p.add_argument("--early-stop-patience", type=int, default=None,
+                   help="Stop a fold early after N epochs without val-loss improvement (paper default: None = run all epochs)")
     p.add_argument("--batch-size",       type=int, default=None)
     p.add_argument("--resume-fold",      type=int, default=0, help="Start from fold index (0-based)")
     p.add_argument("--dry-run",          action="store_true", help="2 folds, 2 epochs each")
@@ -192,7 +194,7 @@ def _run_single_model(
             use_wandb           = not args.no_wandb,
             wandb_kwargs        = {"project": args.wandb_project, "entity": args.wandb_entity},
             lr_schedule         = "linear_decay",   # paper protocol
-            early_stop_patience = None,             # paper: run all epochs
+            early_stop_patience = args.early_stop_patience,
             model_name          = model_name,
         )
 

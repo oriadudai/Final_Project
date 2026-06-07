@@ -161,6 +161,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir",      type=str, default=os.path.join("results", "comparison_reheartnet"))
     p.add_argument("--n-folds",         type=int, default=8)
     p.add_argument("--epochs",          type=int, default=None)
+    p.add_argument("--early-stop-patience", type=int, default=None,
+                   help="Stop a fold early after N epochs without val-loss improvement (paper default: None = run all epochs)")
     p.add_argument("--batch-size",      type=int, default=None)
     p.add_argument("--resume",          action="store_true", help="Resume from existing partial results")
     p.add_argument("--dry-run",         action="store_true", help="2 folds, 2 epochs each")
@@ -213,7 +215,7 @@ def _run_model(
     overlap_frac        = model_cfg.get("overlap_frac", 0.5)
     apply_bandpass      = model_cfg.get("apply_bandpass", False)
     lr_schedule         = model_cfg.get("lr_schedule", "linear_decay")
-    early_stop_patience = model_cfg.get("early_stop_patience", None)
+    early_stop_patience = model_cfg.get("early_stop_patience") or args.early_stop_patience
 
     if args.dry_run:
         epochs = 5         # enough to see emerging metric trends without being too slow
