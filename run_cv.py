@@ -62,6 +62,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--classifier-path",  type=str, default=None, help="Path to PTB-XL classifier .pt")
     p.add_argument("--output-dir",       type=str, default="results")
     p.add_argument("--n-folds",          type=int, default=8)
+    p.add_argument("--n-subjects",       type=int, default=None, help="Use only the first N BIDMC subjects (smoke testing)")
     p.add_argument("--epochs",           type=int, default=None)
     p.add_argument("--batch-size",       type=int, default=None)
     p.add_argument("--resume-fold",      type=int, default=0, help="Start from fold index (0-based)")
@@ -124,7 +125,7 @@ def _run_single_model(
     if args.dry_run:
         epochs = 2
 
-    print(f"[{model_name}] lr={lr}, λ={lambda_clinical}, δ={huber_delta}, "
+    print(f"[{model_name}] lr={lr}, lambda={lambda_clinical}, delta={huber_delta}, "
           f"bs={batch_size}, H={hidden_size}, epochs={epochs}")
 
     # Build shared frozen models once if not provided
@@ -282,7 +283,7 @@ def _save_comparison_summary(
         for m in _METRICS:
             s = model_summary[m]
             if s["mean"] is not None:
-                print(f"  {s['mean']:.3f}±{s['mean']-s['ci95_low']:.3f}   ", end="")
+                print(f"  {s['mean']:.3f}+/-{s['mean']-s['ci95_low']:.3f}   ", end="")
             else:
                 print(f"  {'N/A':<18}", end="")
         print()
@@ -407,6 +408,9 @@ def main() -> None:
     ptbxl_clf    = get_ptbxl_classifier(args.classifier_path).to(device)
 
     all_subjects = get_all_record_names()
+    if args.n_subjects is not None:
+        all_subjects = all_subjects[:args.n_subjects]
+        print(f"Subjects limited to first {args.n_subjects}: {all_subjects}")
     n_folds      = 2 if args.dry_run else args.n_folds
     splits = get_cv_splits(
         all_subjects,
