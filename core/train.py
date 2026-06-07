@@ -139,7 +139,7 @@ def train_fold(
         criterion = nn.HuberLoss(delta=huber_delta)
     else:
         # Default: Huber + CLEF perceptual loss
-        criterion = ClinicalCompositeLoss(clef_encoder, lambda_clinical, huber_delta)
+        criterion = ClinicalCompositeLoss(clef_encoder, lambda_clinical, huber_delta).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     if lr_schedule == "linear_decay":
         # Multiply LR by 0.75 every 50 epochs — matches Lee et al. original setup
