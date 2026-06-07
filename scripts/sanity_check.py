@@ -333,8 +333,8 @@ def main():
     separator("5 - Baseline models")
     dummy_ppg      = torch.randn(2, config.SEQ_LEN, 1)
     expected_shape = (2, config.SEQ_LEN, 1)
-    for name in ("linear", "lstm", "bilstm", "reheartnet"):
-        m   = get_model(name, hidden_size=config.HIDDEN_SIZE, seq_len=config.SEQ_LEN).to(device)
+    for name in ("lstm", "bilstm", "reheartnet"):
+        m   = get_model(name, hidden_size=config.HIDDEN_SIZE).to(device)
         out = m(dummy_ppg)
         if tuple(out.shape) != expected_shape:
             record(problems, f"{name}: output shape {tuple(out.shape)}, expected {expected_shape}")

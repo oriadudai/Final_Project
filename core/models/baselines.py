@@ -4,8 +4,7 @@ All models accept (B, SEQ_LEN, 1) PPG input and produce (B, SEQ_LEN, 1)
 ECG output, matching the ReHeartNet interface so they drop into the same
 train_fold / evaluate_fold pipeline without any changes.
 
-Three baselines:
-  LinearRegressionBaseline  -- per-window OLS, no deep learning
+Two baselines:
   SimpleLSTMBaseline        -- 5-layer stacked LSTM, no dense connections
   PlainBiLSTMBaseline       -- 5-layer stacked BiLSTM, no dense connections
 
@@ -18,33 +17,6 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
-
-
-# ---------------------------------------------------------------------------
-# Linear Regression Baseline
-# ---------------------------------------------------------------------------
-
-class LinearRegressionBaseline(nn.Module):
-    """Per-window linear mapping: PPG (flattened) → ECG (flattened).
-
-    Implemented as a single Linear layer so it participates in the same
-    DataLoader/optimizer loop as the deep models.  Weight initialisation
-    mimics OLS when trained with MSE loss to convergence.
-
-    Input:  (B, SEQ_LEN, 1)
-    Output: (B, SEQ_LEN, 1)
-    """
-
-    def __init__(self, seq_len: int = 1250):
-        super().__init__()
-        self.seq_len = seq_len
-        self.linear = nn.Linear(seq_len, seq_len, bias=True)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, SEQ_LEN, 1)
-        x_flat = x.squeeze(-1)                   # (B, SEQ_LEN)
-        out = self.linear(x_flat)                # (B, SEQ_LEN)
-        return out.unsqueeze(-1)                 # (B, SEQ_LEN, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -126,19 +98,17 @@ class PlainBiLSTMBaseline(nn.Module):
 # ---------------------------------------------------------------------------
 
 _REGISTRY = {
-    "linear":    LinearRegressionBaseline,
     "lstm":      SimpleLSTMBaseline,
     "bilstm":    PlainBiLSTMBaseline,
 }
 
 
-def get_model(name: str, hidden_size: int = 64, seq_len: int = 1250) -> nn.Module:
+def get_model(name: str, hidden_size: int = 64) -> nn.Module:
     """Return a model instance by short name.
 
     Args:
-        name:        One of "linear", "lstm", "bilstm", "reheartnet".
+        name:        One of "lstm", "bilstm", "reheartnet".
         hidden_size: Hidden units for LSTM-based models.
-        seq_len:     Sequence length for the linear baseline.
 
     Returns:
         Initialised nn.Module with the ReHeartNet-compatible interface.
@@ -150,6 +120,4 @@ def get_model(name: str, hidden_size: int = 64, seq_len: int = 1250) -> nn.Modul
     if name not in _REGISTRY:
         raise ValueError(f"Unknown model '{name}'. Choose from: {list(_REGISTRY)+ ['reheartnet']}")
     cls = _REGISTRY[name]
-    if name == "linear":
-        return cls(seq_len=seq_len)
     return cls(hidden_size=hidden_size)

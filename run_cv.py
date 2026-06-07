@@ -46,7 +46,7 @@ from core.visualization.plots import (
 )
 from src.preprocessing import get_all_record_names
 
-_ALL_MODELS = ["linear", "lstm", "bilstm", "reheartnet"]
+_ALL_MODELS = ["lstm", "bilstm", "reheartnet"]
 _METRICS    = ["rmse", "prd", "pearson_r", "bce", "emd", "ks_stat", "beat_timing_mae"]
 
 
@@ -298,7 +298,7 @@ def _plot_comparison(
     """Bar chart comparing all models on each metric (mean ± 95% CI)."""
     os.makedirs(os.path.join(output_dir, "figures"), exist_ok=True)
     model_names  = list(all_model_metrics.keys())
-    display_names = {"linear": "Linear\nReg.", "lstm": "S-LSTM", "bilstm": "P-BiLSTM", "reheartnet": "ReHeartNet\n(ours)"}
+    display_names = {"lstm": "S-LSTM", "bilstm": "P-BiLSTM", "reheartnet": "ReHeartNet\n(ours)"}
 
     for metric in _METRICS:
         means, lows, highs = [], [], []

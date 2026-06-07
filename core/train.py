@@ -112,8 +112,8 @@ def train_fold(
                          None disables early stopping entirely (runs all epochs).
         lr_patience:     Epochs without val improvement before halving LR.
                          Only used when lr_schedule="plateau".
-        model_name:      Architecture to train: "reheartnet", "linear", "lstm",
-                         or "bilstm" (see core.models.baselines.get_model).
+        model_name:      Architecture to train: "reheartnet", "lstm", or "bilstm"
+                         (see core.models.baselines.get_model).
         loss_type:       "clef"  → Huber + CLEF perceptual loss (our method)
                          "huber" → Huber only
                          "mse"   → Plain MSE (original ReHeartNet)
@@ -129,8 +129,7 @@ def train_fold(
 
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    model = get_model(model_name, hidden_size=hidden_size,
-                      seq_len=config.SEQ_LEN).to(device)
+    model = get_model(model_name, hidden_size=hidden_size).to(device)
 
     if loss_type == "mse":
         criterion = nn.MSELoss()
