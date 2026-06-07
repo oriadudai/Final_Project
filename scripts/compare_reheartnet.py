@@ -199,7 +199,11 @@ def _run_model(
     the multi-model waveform overlay and RR KDE comparison figures.
 
     Hyperparameter priority (highest -> lowest):
-      model_cfg explicit value  >  args CLI override  >  best_params (Optuna)  >  config default
+      args CLI override  >  model_cfg explicit value  >  best_params (Optuna)  >  config default
+
+    CLI overrides (--epochs, --early-stop-patience, --batch-size) take top priority
+    so that a long paper-spec run (epochs=1000, no early stopping) can be deliberately
+    scaled down for tractability without editing MODELS.
 
     For reheartnet_original, use_optuna=False so best_params is never consulted —
     only paper-specified values (in model_cfg) or config defaults are used.
@@ -207,8 +211,8 @@ def _run_model(
     # The original paper fixed hyperparameters manually; never pull Optuna values for it.
     hp = best_params if model_cfg.get("use_optuna", True) else {}
 
-    epochs      = model_cfg.get("epochs")     or args.epochs     or int(hp.get("epochs",           config.EPOCHS))
-    batch_size  = model_cfg.get("batch_size") or args.batch_size or int(hp.get("batch_size",       config.BATCH_SIZE))
+    epochs      = args.epochs     or model_cfg.get("epochs")     or int(hp.get("epochs",           config.EPOCHS))
+    batch_size  = args.batch_size or model_cfg.get("batch_size") or int(hp.get("batch_size",       config.BATCH_SIZE))
     hidden_size =                                                    int(hp.get("hidden_size",      config.HIDDEN_SIZE))
     lr          = model_cfg.get("lr")         or                  float(hp.get("lr",               config.LEARNING_RATE))
     huber_delta =                                                  float(hp.get("huber_delta",      config.HUBER_DELTA))
@@ -219,7 +223,8 @@ def _run_model(
     overlap_frac        = model_cfg.get("overlap_frac", 0.5)
     apply_bandpass      = model_cfg.get("apply_bandpass", False)
     lr_schedule         = model_cfg.get("lr_schedule", "linear_decay")
-    early_stop_patience = model_cfg.get("early_stop_patience") or args.early_stop_patience
+    early_stop_patience = args.early_stop_patience if args.early_stop_patience is not None \
+                          else model_cfg.get("early_stop_patience")
 
     if args.dry_run:
         epochs = 5         # enough to see emerging metric trends without being too slow
