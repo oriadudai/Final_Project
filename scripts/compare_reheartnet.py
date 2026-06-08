@@ -99,15 +99,18 @@ MODELS = {
     "reheartnet_huber": {
         "label":               "ReHeartNet + Huber (ours)",
         "loss_type":           "huber",
-        # Same preprocessing and training protocol as the original paper.
-        # Only the loss function changes (MSE -> Huber).
-        # Optuna tunes loss hyperparameters (huber_delta) and hidden_size.
+        # Same preprocessing and training protocol as the original paper, AND
+        # pinned to the same lr/hidden_size as reheartnet_original -- so this
+        # is a true apples-to-apples test of MSE vs. Huber, isolating the loss
+        # function as the only variable. huber_delta is left Optuna-tuned since
+        # it's intrinsic to the loss being evaluated (no paper baseline exists).
         "window_sec":          4.0,
         "overlap_frac":        0.0,
         "apply_bandpass":      True,
         "batch_size":          1,
         "epochs":              1000,
         "lr":                  1e-2,
+        "hidden_size":         64,
         "lr_schedule":         "linear_decay",
         "early_stop_patience": None,
     },
@@ -213,7 +216,7 @@ def _run_model(
 
     epochs      = args.epochs     or model_cfg.get("epochs")     or int(hp.get("epochs",           config.EPOCHS))
     batch_size  = args.batch_size or model_cfg.get("batch_size") or int(hp.get("batch_size",       config.BATCH_SIZE))
-    hidden_size =                                                    int(hp.get("hidden_size",      config.HIDDEN_SIZE))
+    hidden_size = model_cfg.get("hidden_size") or                   int(hp.get("hidden_size",      config.HIDDEN_SIZE))
     lr          = model_cfg.get("lr")         or                  float(hp.get("lr",               config.LEARNING_RATE))
     huber_delta =                                                  float(hp.get("huber_delta",      config.HUBER_DELTA))
     lambda_clinical =                                              float(hp.get("lambda_clinical",  config.LAMBDA_CLINICAL))
