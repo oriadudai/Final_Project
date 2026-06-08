@@ -14,10 +14,14 @@ every 50 epochs, 1000 epochs, no early stopping.  Only the loss function changes
        10 s windows (CLEF encoder requires 10 s input).
        Optuna tunes lambda_clinical, huber_delta, and hidden_size.
 
-Outputs:
-  results/comparison_reheartnet/summary_{model}.json   per-model summary
-  results/comparison_reheartnet/comparison.json        side-by-side table
-  results/comparison_reheartnet/figures/               all plots
+Outputs (organised per experiment — each variant's weights, metrics, and
+per-fold figures live together under its own directory):
+  results/comparison_reheartnet/{model}/checkpoints/   per-fold model weights
+  results/comparison_reheartnet/{model}/figures/       per-fold loss/recon plots
+  results/comparison_reheartnet/{model}/partial.json   incremental per-fold metrics (--resume)
+  results/comparison_reheartnet/{model}/summary.json   per-model summary (mean +/- CI)
+  results/comparison_reheartnet/comparison.json        cross-model side-by-side table
+  results/comparison_reheartnet/figures/               cross-model comparison plots
 
 Usage:
     python scripts/compare_reheartnet.py --clef-path models/clef/clef_small.ckpt
@@ -242,7 +246,10 @@ def _run_model(
 
     fold0_sample: dict = {}   # populated on fold 0 for comparison figures
 
-    partial_path = os.path.join(args.output_dir, f"partial_{model_key}.json")
+    # Everything for this experiment (weights, partial/summary results, per-fold
+    # figures) lives together under one directory, keyed by model_key.
+    run_dir = os.path.join(args.output_dir, model_key)
+    partial_path = os.path.join(run_dir, "partial.json")
     fold_metrics: list = []
     resume_from = 0
     if args.resume and os.path.exists(partial_path):
@@ -284,7 +291,7 @@ def _run_model(
             lambda_clinical     = lambda_clinical,
             huber_delta         = huber_delta,
             hidden_size         = hidden_size,
-            checkpoint_dir      = os.path.join(args.output_dir, "checkpoints"),
+            checkpoint_dir      = os.path.join(run_dir, "checkpoints"),
             use_wandb           = not args.no_wandb,
             wandb_kwargs        = {"project": args.wandb_project,
                                    "entity":  args.wandb_entity,
@@ -360,21 +367,21 @@ def _run_model(
             f"KS={metrics['ks_stat']:.3f}  beat-MAE={metrics['beat_timing_mae']:.4f}s"
         )
 
-        # Per-fold figures
-        fig_dir = os.path.join(args.output_dir, "figures")
+        # Per-fold figures — kept alongside this experiment's weights and results
+        run_fig_dir = os.path.join(run_dir, "figures")
         plot_loss_curves(
             history["train"], history["val"], fold_idx,
-            save_path=os.path.join(fig_dir, f"loss_{model_key}_fold{fold_idx:02d}.png"),
+            save_path=os.path.join(run_fig_dir, f"loss_fold{fold_idx:02d}.png"),
         )
         _save_recon_figure(model, test_loader, test_subs, device,
-                           fold_idx, model_key, fig_dir)
+                           fold_idx, run_fig_dir)
 
         with open(partial_path, "w") as f:
             json.dump(fold_metrics, f, indent=2, default=str)
 
     save_results_summary(
         fold_metrics,
-        save_path=os.path.join(args.output_dir, f"summary_{model_key}.json"),
+        save_path=os.path.join(run_dir, "summary.json"),
     )
     return fold_metrics, fold0_sample
 
@@ -1050,7 +1057,7 @@ def _plot_rr_kde_comparison(all_samples: dict, output_dir: str, fs: int = 125) -
 # ------------------------------------------------------------------------------
 
 def _save_recon_figure(model, test_loader, test_subs, device,
-                       fold_idx, model_key, fig_dir) -> None:
+                       fold_idx, fig_dir) -> None:
     model.eval()
     with torch.no_grad():
         ppg_b, ecg_b = next(iter(test_loader))
@@ -1063,7 +1070,7 @@ def _save_recon_figure(model, test_loader, test_subs, device,
         true_np, pred_np,
         subject_ids=[test_subs[min(i, len(test_subs)-1)] for i in range(min(4, len(true_np)))],
         fold_idx=fold_idx,
-        save_path=os.path.join(fig_dir, f"recon_{model_key}_fold{fold_idx:02d}.png"),
+        save_path=os.path.join(fig_dir, f"recon_fold{fold_idx:02d}.png"),
     )
 
 
@@ -1076,7 +1083,8 @@ def main() -> None:
 
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(os.path.join(args.output_dir, "figures"), exist_ok=True)
-    os.makedirs(os.path.join(args.output_dir, "checkpoints"), exist_ok=True)
+    # Per-variant subdirectories (checkpoints/partial/summary/figures) are created
+    # lazily inside _run_model, keyed by model_key — see run_dir below.
 
     device = config.DEVICE
     print(f"Device: {device}")

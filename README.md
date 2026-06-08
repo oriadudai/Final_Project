@@ -132,6 +132,25 @@ python scripts/tune_hyperparams.py --resume
 | `figures/optuna_history.png` | Trial convergence |
 | `figures/optuna_importances.png` | Parameter importances |
 
+**Running details — our search:** the study is backed by a persistent SQLite database
+(`load_if_exists=True`), so it can be resumed across separate process invocations without
+losing prior trials (`--resume`). Because the search shares the GPU cluster with the main
+training jobs, it was run in two sessions — an initial wall-clock-limited run plus a resumed
+continuation — together completing **25 of the allocated 50 trials** (~13 h combined
+wall-clock) before the study was frozen.
+
+**Best hyperparameters found** (`results/best_hyperparams.json`):
+
+| Hyperparameter | Best value |
+|---|---|
+| Learning rate `lr` | 3.15 × 10⁻⁴ |
+| CLEF loss weight `lambda_clinical` | 0.964 |
+| Huber delta `huber_delta` | 1.714 |
+| Hidden size `H` | 32 |
+
+This configuration is frozen and reused (or selectively overridden — see Step 3) across all
+later experiments to keep the comparison fair.
+
 ---
 
 ### Step 2 — Main 8-Fold CV *(proposed model)*
@@ -194,8 +213,37 @@ python scripts/compare_reheartnet.py --dry-run --no-wandb
 
 **Outputs** → `results/comparison_reheartnet/`
 
+Each variant's weights, metrics, and per-fold figures are kept together under its
+**own experiment directory** — nothing is scattered across shared `checkpoints/`/`figures/`
+folders, so a variant's full record (and `--resume` state) is self-contained:
+
+```
+results/comparison_reheartnet/
+├── reheartnet_original/
+│   ├── checkpoints/reheartnet_fold_XX_best.pt   ← per-fold model weights
+│   ├── figures/loss_foldXX.png, recon_foldXX.png
+│   ├── partial.json                              ← incremental per-fold metrics (--resume)
+│   └── summary.json                              ← mean ± CI for this variant
+├── reheartnet_huber/      (same layout)
+├── reheartnet_clef/       (same layout)
+├── comparison.json                               ← cross-model side-by-side table
+├── per_fold_results.json
+├── results_report.txt
+└── figures/                                      ← cross-model comparison plots only
+    ├── comparison_table.tex
+    ├── comparison_panel.png
+    ├── delta_improvement.png
+    ├── per_fold_boxes.png
+    ├── rr_kde_comparison.png
+    ├── paper_reconstruction.png
+    └── cmp_{metric}.png
+```
+
 | File | Description |
 |------|-------------|
+| `{model}/checkpoints/*_best.pt` | Per-fold model weights for that experiment |
+| `{model}/partial.json` | Incremental per-fold metrics (enables `--resume`) |
+| `{model}/summary.json` | Per-variant mean ± 95% CI summary |
 | `results_report.txt` | **Human-readable table + per-fold breakdown** (open in any editor) |
 | `per_fold_results.json` | Flat JSON — one entry per fold per model (easy to parse) |
 | `comparison.json` | Full nested JSON — mean ± CI for every metric |
@@ -206,7 +254,6 @@ python scripts/compare_reheartnet.py --dry-run --no-wandb
 | `figures/per_fold_boxes.png` | Box plots — per-fold distribution per model |
 | `figures/rr_kde_comparison.png` | RR interval KDE — all models overlaid |
 | `figures/cmp_{metric}.png` | Per-metric bar chart (green outline = best) |
-| `summary_reheartnet_{original,huber,clef}.json` | Per-variant summaries |
 
 > `Δ_Huber` = original → Huber gap = benefit of Huber loss  
 > `Δ_CLEF`  = Huber → CLEF gap = benefit of CLEF clinical perceptual regularisation
@@ -240,15 +287,22 @@ results/
 │   ├── metric_bar_reheartnet_*.png
 │   ├── metric_boxplots_reheartnet.png
 │   └── comparison_*.png             ← Step 4 (ablation)
-└── comparison_reheartnet/           ← Step 3
-    ├── comparison.json
-    ├── figures/comparison_panel.png ← KEY FIGURE for paper
+└── comparison_reheartnet/           ← Step 3 (each variant self-contained — see below)
+    ├── reheartnet_original/checkpoints/, figures/, partial.json, summary.json
+    ├── reheartnet_huber/   checkpoints/, figures/, partial.json, summary.json
+    ├── reheartnet_clef/    checkpoints/, figures/, partial.json, summary.json
+    ├── comparison.json                  ← cross-model side-by-side table
+    ├── figures/comparison_panel.png     ← KEY FIGURE for paper
     └── figures/cmp_*.png
 
-checkpoints/                         ← ignored by git
-├── reheartnet_fold_XX_best.pt       ← Step 2
-├── reheartnet_{original,huber,clef}_fold_XX_best.pt  ← Step 3
+checkpoints/                         ← ignored by git (Step 2 only)
+└── reheartnet_fold_XX_best.pt       ← Step 2 main CV
 ```
+> Step 3 checkpoints live inside each variant's own directory
+> (`comparison_reheartnet/{model}/checkpoints/`), not in the shared `checkpoints/` above —
+> this keeps every experiment's weights, metrics, and figures together and prevents the
+> three variants (which all share the same `reheartnet_fold_XX_best.pt` filename) from
+> overwriting each other.
 
 ---
 
