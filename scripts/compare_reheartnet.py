@@ -245,6 +245,7 @@ def _run_model(
     label = model_cfg["label"]
     n_folds = len(splits)
     print(f"\n  loss={loss_type}  |  lr={lr}  |  H={hidden_size}  |  epochs={epochs}  |  folds={n_folds}")
+    print(f"  huber_delta={huber_delta}  |  lambda_clinical={lambda_clinical}")
     if window_sec is not None:
         print(f"  window={window_sec}s  overlap={overlap_frac:.0%}  bandpass={apply_bandpass}")
 
