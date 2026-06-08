@@ -95,6 +95,10 @@ MODELS = {
         "batch_size":          1,
         "epochs":              1000,
         "lr":                  1e-2,
+        # Paper does not specify hidden_size; pinned to the Optuna-found value
+        # (32) so all three loss variants share one hidden_size, keeping the
+        # loss function the only variable that differs between them.
+        "hidden_size":         32,
         "lr_schedule":         "linear_decay",
         "early_stop_patience": None,          # run all 1000 epochs
         # Paper did not use Optuna; anything not above falls back to config defaults
@@ -114,7 +118,7 @@ MODELS = {
         "batch_size":          1,
         "epochs":              1000,
         "lr":                  1e-2,
-        "hidden_size":         64,
+        "hidden_size":         32,
         "lr_schedule":         "linear_decay",
         "early_stop_patience": None,
     },
