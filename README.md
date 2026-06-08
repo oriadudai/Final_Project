@@ -196,8 +196,12 @@ protocol as Lee et al. — only the loss function changes:
 | `reheartnet_huber` | 4 s, no overlap, FIR bandpass | Huber | Effect of Huber loss |
 | `reheartnet_clef` | 10 s, 50% overlap, z-score only | Huber + CLEF | Our full method |
 
-> All variants use batch=1, lr=1e-2, ×0.75 linear decay every 50 epochs, 1000 epochs (paper protocol).
-> The only thing Optuna tunes is `huber_delta`, `lambda_clinical`, and `hidden_size` — not the training dynamics.
+> All variants use batch=1, lr=1e-2, ×0.75 linear decay every 50 epochs, up to 1000 epochs
+> with early stopping on validation loss (patience=80), and hidden size `H=32` — the
+> Optuna-selected value (see Step 1), pinned uniformly across all three variants so that
+> the loss function remains the only variable that differs between them.
+> Loss-specific hyperparameters (`huber_delta`, `lambda_clinical`) are taken from the
+> Optuna study; everything else follows the paper protocol.
 > `reheartnet_clef` uses 10 s windows because the CLEF encoder requires 10 s input (see BCE note below).
 
 ```bash
@@ -332,7 +336,10 @@ Final_Project/
 │   ├── tune_hyperparams.py         # Step 1 — Optuna search (--fast / default / --full)
 │   ├── compare_reheartnet.py       # Step 3 — 3-way comparison (original/Huber/CLEF)
 │   ├── sanity_check.py             # Quick end-to-end test (~2 min)
-│   └── setup_clef.py               # Clone + patch + install CLEF
+│   ├── setup_clef.py               # Clone + patch + install CLEF
+│   ├── download_ptbxl.py           # Diag-consistency: one-time PTB-XL download (standalone)
+│   ├── train_diagnostic_classifier.py  # Diag-consistency: one-time PTB-XL classifier training (standalone)
+│   └── evaluate_diagnostic_consistency.py  # Diag-consistency: post-hoc eval on saved checkpoints (standalone)
 ├── run_cv.py                       # Steps 2 & 4 — main CV entry point
 ├── environment.yml                 # Conda environment (Python 3.12)
 ├── requirements.txt                # pip dependencies
@@ -358,14 +365,18 @@ BiLSTM Block 1  (hidden=H)   → 2H-dim output
 BiLSTM Block 2               → 2H-dim output
     ↓  dense: [input(1) + B1(2H) + B2(2H)] = (1+4H)-dim input
 BiLSTM Block 3 ... Block 5
-    ↓  concatenate all features: (1 + 5×2H)-dim = 641-dim  [at H=64]
+    ↓  concatenate all features: (1 + 5×2H)-dim = 321-dim  [at H=32]
 Linear head  →  1 scalar per timestep
     ↓
 ECG output  (B, L, 1)        [reconstructed Lead II, same length as input]
 ```
 
 > **Note on hidden size H:** Lee et al. defer exact hyperparameters to supplementary.
-> We default to `H=64` and tune it via Optuna `{32, 64, 128}`.
+> We tuned it via Optuna `{32, 64, 128}` (Step 1), which selected `H=32`
+> (≈209K params, vs. ≈827K at `H=64` — LSTM gate weights scale roughly
+> quadratically with `H`). We then adopt `H=32` uniformly across *every*
+> model in this work, not only the variant Optuna was tuned against, so
+> hidden size never confounds the cross-model comparisons.
 
 **Published BIDMC results** from Lee et al. (2026) Table I — LOSO evaluation:
 
@@ -433,6 +444,44 @@ R-peaks detected with `neurokit2.ecg_peaks()` (Pan-Tompkins). Windows with <3 pe
 
 ---
 
+## Diagnostic-Consistency Evaluation (additive, post-hoc)
+
+A further metric — **diagnostic consistency** (`diag_kl`, `diag_flip_rate`) — complements BCE
+with a label-grounded question: *would a classifier trained on real diagnoses reach the same
+conclusion on the reconstruction as on the real ECG?* Where BCE checks consistency in CLEF's
+label-free pretrained feature space, this metric checks agreement against an actual PTB-XL-trained
+pathology classifier — the same spirit as the downstream validation in Guan et al. (2026)
+*WearECG*, adapted for the label-free BIDMC setting (consistency rather than absolute accuracy,
+since BIDMC has no diagnostic labels to validate the reconstruction against directly).
+
+It is implemented as **three standalone scripts that touch none of the training/eval pipeline**
+(`run_cv.py` / `compare_reheartnet.py` / `core/evaluate.py`) — they only read already-saved
+checkpoints and write their own results file, so they can be run alongside or after the CV jobs
+without any risk of interference:
+
+```bash
+# 1. One-time: download PTB-XL (100 Hz records + labels, ~1.7 GB) — can run in parallel with CV
+python scripts/download_ptbxl.py
+
+# 2. One-time: train a real diagnostic classifier on PTB-XL's 5 superclasses (NORM/MI/STTC/CD/HYP)
+python scripts/train_diagnostic_classifier.py
+#    -> checkpoints/ptbxl_diagnostic_classifier.pt
+
+# 3. Once the CV runs have finished: score every saved checkpoint against it
+python scripts/evaluate_diagnostic_consistency.py \
+    --diagnostic-classifier checkpoints/ptbxl_diagnostic_classifier.pt \
+    --out results/diag_consistency.json
+```
+
+`evaluate_diagnostic_consistency.py` rebuilds each fold's exact test split from the
+`fold_subjects` saved inside its checkpoint, runs the trained reconstruction model plus the
+frozen PTB-XL classifier, and reports `diag_kl` (mean KL divergence between real/reconstructed
+diagnostic-probability vectors) and `diag_flip_rate` (top-1 diagnosis disagreement rate),
+aggregated as mean ± 95% CI per model variant — additive to, never a replacement for, the
+existing CLEF-based BCE.
+
+---
+
 ## Cross-Validation Design
 
 **8-fold group CV** — `KFold(n_splits=8, shuffle=True, random_state=42)` at subject level:
@@ -461,6 +510,8 @@ SEQ_LEN         = 1250      # 10 s × 125 Hz (CLEF model default)
                             # compare_reheartnet.py overrides to 500 (4 s)
                             # for original and Huber variants
 HIDDEN_SIZE     = 64        # BiLSTM hidden units per direction  [Optuna: 32/64/128]
+                            # code default; all experiments in this work override
+                            # it to the Optuna-selected H=32 (see Step 1 / Step 3)
 
 # ── Our contributions (not in original paper) ─────────────────────────────
 LAMBDA_CLINICAL = 0.1       # CLEF perceptual loss weight        [Optuna: 1e-3–1.0]
