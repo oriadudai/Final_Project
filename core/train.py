@@ -31,6 +31,9 @@ def train_one_epoch(
         optimizer.zero_grad()
         predictions = model(ppg)
         loss = criterion(predictions, ecg)
+        if not torch.isfinite(loss):
+            optimizer.zero_grad()
+            continue
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()

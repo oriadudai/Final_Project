@@ -199,7 +199,9 @@ protocol as Lee et al. — only the loss function changes:
 > **From Lee et al. protocol:** batch=1, lr=1e-2, ×0.75 linear decay every 50 epochs, up to 1000 epochs.
 > **Our additions (not in Lee et al.):** hidden size `H=32` (Optuna-selected, see Step 1);
 > early stopping on validation loss (patience=80, for tractability); gradient clipping
-> (max norm 1.0, for numerical stability); loss-specific hyperparameters `huber_delta`
+> (max norm 1.0, for numerical stability); per-batch NaN guard (skip optimizer step if
+> loss is non-finite, preventing weight corruption from pathological windows);
+> loss-specific hyperparameters `huber_delta`
 > and `lambda_clinical` from the Optuna study.
 > `H=32` is pinned uniformly across all three variants so the loss function remains the only variable.
 > `reheartnet_clef` uses 10 s windows because the CLEF encoder requires 10 s input (see BCE note below).
