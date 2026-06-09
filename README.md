@@ -200,7 +200,9 @@ protocol as Lee et al. — only the loss function changes:
 > **Our additions (not in Lee et al.):** hidden size `H=32` (Optuna-selected, see Step 1);
 > early stopping on validation loss (patience=80, for tractability); gradient clipping
 > (max norm 1.0, for numerical stability); per-batch NaN guard (skip optimizer step if
-> loss is non-finite, preventing weight corruption from pathological windows);
+> loss is non-finite); post-step weight-integrity check (exit epoch if any parameter
+> becomes non-finite after the Adam update — early stopping then recovers via
+> best-checkpoint restore);
 > loss-specific hyperparameters `huber_delta`
 > and `lambda_clinical` from the Optuna study.
 > `H=32` is pinned uniformly across all three variants so the loss function remains the only variable.

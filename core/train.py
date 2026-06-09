@@ -37,6 +37,9 @@ def train_one_epoch(
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
+        if not all(torch.isfinite(p).all() for p in model.parameters()):
+            optimizer.zero_grad()
+            break  # weights corrupted — exit epoch, early-stop will handle it
         running_loss += loss.item()
         # Collect CLEF composite loss components if available
         if hasattr(criterion, "last_huber_loss"):
