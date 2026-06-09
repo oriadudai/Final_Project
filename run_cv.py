@@ -69,9 +69,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--batch-size",       type=int, default=None)
     p.add_argument("--resume-fold",      type=int, default=0, help="Start from fold index (0-based)")
     p.add_argument("--dry-run",          action="store_true", help="2 folds, 2 epochs each")
-    p.add_argument("--no-wandb",         action="store_true")
-    p.add_argument("--wandb-project",    type=str, default="ppg2ecg-reheartnet")
-    p.add_argument("--wandb-entity",     type=str, default=None)
     p.add_argument(
         "--model", type=str, default="reheartnet",
         choices=_ALL_MODELS,
@@ -178,6 +175,11 @@ def _run_single_model(
 
         print(f"  Train: {len(train_inner)} | Val: {len(val_ds)} | Test: {len(test_ds)} windows")
 
+        ckpt_path = os.path.join(config.CHECKPOINT_DIR, f"{model_name}_fold_{fold_idx:02d}_best.pt")
+        resume_ckpt = ckpt_path if (fold_idx == args.resume_fold and os.path.exists(ckpt_path)) else None
+        if resume_ckpt:
+            print(f"  Mid-fold checkpoint found, resuming from: {resume_ckpt}")
+
         model, history = train_fold(
             fold_idx        = fold_idx,
             fold_subjects   = test_subs,
@@ -191,11 +193,11 @@ def _run_single_model(
             huber_delta     = huber_delta,
             hidden_size     = hidden_size,
             checkpoint_dir  = config.CHECKPOINT_DIR,
-            use_wandb           = not args.no_wandb,
-            wandb_kwargs        = {"project": args.wandb_project, "entity": args.wandb_entity},
+            use_wandb           = False,
             lr_schedule         = "linear_decay",   # paper protocol
             early_stop_patience = args.early_stop_patience,
             model_name          = model_name,
+            resume_checkpoint   = resume_ckpt,
         )
 
         metrics = evaluate_fold(model, test_loader, ptbxl_clf, device, clef_encoder=clef_encoder)

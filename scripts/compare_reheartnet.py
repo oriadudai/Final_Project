@@ -181,11 +181,6 @@ def _parse_args() -> argparse.Namespace:
                         "Lets each loss variant be launched as its own process on its own GPU; "
                         "rerun without --only (with --resume) afterward to assemble the comparison.")
     p.add_argument("--dry-run",         action="store_true", help="2 folds, 2 epochs each")
-    p.add_argument("--no-wandb",        action="store_true")
-    p.add_argument("--wandb-project",   type=str, default="ppg2ecg-reheartnet",
-                   help="W&B project name")
-    p.add_argument("--wandb-entity",    type=str, default=None,
-                   help="W&B entity (username or team). Defaults to your logged-in account.")
     return p.parse_args()
 
 
@@ -284,6 +279,12 @@ def _run_model(
         val_loader   = DataLoader(val_ds,      batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
         test_loader  = DataLoader(test_ds,     batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
+        ckpt_dir = os.path.join(run_dir, "checkpoints")
+        ckpt_path = os.path.join(ckpt_dir, f"reheartnet_fold_{fold_idx:02d}_best.pt")
+        resume_ckpt = ckpt_path if (fold_idx == resume_from and os.path.exists(ckpt_path)) else None
+        if resume_ckpt:
+            print(f"  Mid-fold checkpoint found, resuming from: {resume_ckpt}")
+
         model, history = train_fold(
             fold_idx            = fold_idx,
             fold_subjects       = test_subs,
@@ -296,15 +297,13 @@ def _run_model(
             lambda_clinical     = lambda_clinical,
             huber_delta         = huber_delta,
             hidden_size         = hidden_size,
-            checkpoint_dir      = os.path.join(run_dir, "checkpoints"),
-            use_wandb           = not args.no_wandb,
-            wandb_kwargs        = {"project": args.wandb_project,
-                                   "entity":  args.wandb_entity,
-                                   "group":   model_key},   # groups all folds per model variant
-            model_name          = "reheartnet",   # same DC-BiLSTM architecture for all variants
+            checkpoint_dir      = ckpt_dir,
+            use_wandb           = False,
+            model_name          = "reheartnet",
             loss_type           = loss_type,
             lr_schedule         = lr_schedule,
             early_stop_patience = early_stop_patience,
+            resume_checkpoint   = resume_ckpt,
         )
 
         if window_sec is not None:
@@ -1162,7 +1161,6 @@ def main() -> None:
     summary = _save_comparison_json(all_results, args.output_dir)
     _print_comparison_table(summary)
     _save_results_report(summary, all_results, args.output_dir)
-    _log_wandb_comparison(summary, all_results, args)
     _plot_side_by_side(summary, args.output_dir)
     _plot_delta_bars(summary, args.output_dir)
     _plot_per_fold_boxes(all_results, args.output_dir)

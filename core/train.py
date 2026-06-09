@@ -10,11 +10,7 @@ import core.config as config
 from core.models.reheartnet import ReHeartNet
 from core.losses.composite_loss import ClinicalCompositeLoss
 
-try:
-    import wandb
-    WANDB_AVAILABLE = True
-except ImportError:
-    WANDB_AVAILABLE = False
+WANDB_AVAILABLE = False
 
 
 def train_one_epoch(
@@ -81,13 +77,14 @@ def train_fold(
     huber_delta: float = config.HUBER_DELTA,
     hidden_size: int = config.HIDDEN_SIZE,
     checkpoint_dir: str = config.CHECKPOINT_DIR,
-    use_wandb: bool = True,
+    use_wandb: bool = False,
     wandb_kwargs: Optional[dict] = None,
     early_stop_patience: Optional[int] = None,  # paper: run all epochs; set int to enable
     lr_patience: int = 10,                       # only used when lr_schedule="plateau"
     model_name: str = "reheartnet",
     loss_type:  str = "clef",
     lr_schedule: str = "linear_decay",   # paper default: ×0.75 every 50 epochs
+    resume_checkpoint: Optional[str] = None,
 ) -> Tuple[nn.Module, Dict[str, List[float]]]:
     """Train a model for one CV fold.
 
@@ -175,9 +172,20 @@ def train_fold(
 
     best_val_loss = float("inf")
     no_improve    = 0
+    start_epoch   = 1
     history: Dict[str, List[float]] = {"train": [], "val": []}
 
-    for epoch in range(1, epochs + 1):
+    if resume_checkpoint and os.path.exists(resume_checkpoint):
+        ckpt = torch.load(resume_checkpoint, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        best_val_loss = ckpt["val_loss"]
+        start_epoch   = ckpt["epoch"] + 1
+        if isinstance(scheduler, optim.lr_scheduler.LambdaLR):
+            scheduler.last_epoch = ckpt["epoch"]
+        print(f"  Resumed from checkpoint: epoch {ckpt['epoch']}, val_loss={best_val_loss:.5f}")
+
+    for epoch in range(start_epoch, epochs + 1):
         train_info = train_one_epoch(model, train_loader, criterion, optimizer, device)
         train_loss = train_info["loss"]
         val_loss   = validate(model, val_loader, criterion, device)
