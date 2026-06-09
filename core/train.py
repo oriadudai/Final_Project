@@ -32,6 +32,7 @@ def train_one_epoch(
         predictions = model(ppg)
         loss = criterion(predictions, ecg)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         running_loss += loss.item()
         # Collect CLEF composite loss components if available

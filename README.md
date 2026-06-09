@@ -196,12 +196,12 @@ protocol as Lee et al. — only the loss function changes:
 | `reheartnet_huber` | 4 s, no overlap, FIR bandpass | Huber | Effect of Huber loss |
 | `reheartnet_clef` | 10 s, 50% overlap, z-score only | Huber + CLEF | Our full method |
 
-> All variants use batch=1, lr=1e-2, ×0.75 linear decay every 50 epochs, up to 1000 epochs
-> with early stopping on validation loss (patience=80), and hidden size `H=32` — the
-> Optuna-selected value (see Step 1), pinned uniformly across all three variants so that
-> the loss function remains the only variable that differs between them.
-> Loss-specific hyperparameters (`huber_delta`, `lambda_clinical`) are taken from the
-> Optuna study; everything else follows the paper protocol.
+> **From Lee et al. protocol:** batch=1, lr=1e-2, ×0.75 linear decay every 50 epochs, up to 1000 epochs.
+> **Our additions (not in Lee et al.):** hidden size `H=32` (Optuna-selected, see Step 1);
+> early stopping on validation loss (patience=80, for tractability); gradient clipping
+> (max norm 1.0, for numerical stability); loss-specific hyperparameters `huber_delta`
+> and `lambda_clinical` from the Optuna study.
+> `H=32` is pinned uniformly across all three variants so the loss function remains the only variable.
 > `reheartnet_clef` uses 10 s windows because the CLEF encoder requires 10 s input (see BCE note below).
 
 ```bash
