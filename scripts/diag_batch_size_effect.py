@@ -65,7 +65,8 @@ def main():
     ap.add_argument("--hidden-size", type=int, default=32)
     ap.add_argument("--loss-type", type=str, default="mse")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--fold-assignments", type=str, default="results/fold_assignments.json")
+    ap.add_argument("--fold-assignments", type=str,
+                    default="results/comparison_reheartnet/fold_assignments.json")
     ap.add_argument("--output-dir", type=str, default="results/diag_batch_size")
     args = ap.parse_args()
 
