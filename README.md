@@ -207,6 +207,11 @@ protocol as Lee et al. — only the loss function changes:
 > and `lambda_clinical` from the Optuna study.
 > `H=32` is pinned uniformly across all three variants so the loss function remains the only variable.
 > `reheartnet_clef` uses 10 s windows because the CLEF encoder requires 10 s input (see BCE note below).
+> `--no-phase-align` (not in Lee et al.): diagnostic/ablation flag that disables the
+> train-only PPG→ECG phase alignment (see Cross-Validation Design below), making
+> train and test preprocessing consistent. Off by default — the default run preserves
+> the Lee et al. train-only-alignment protocol. Saves to a separate `--output-dir` so
+> it doesn't overwrite the main results.
 
 ```bash
 python scripts/compare_reheartnet.py --no-wandb
@@ -216,6 +221,10 @@ python scripts/compare_reheartnet.py --no-wandb --resume
 
 # Dry-run: 2 folds, 5 epochs, 5 subjects — ~12-15 min on CPU, shows emerging trends
 python scripts/compare_reheartnet.py --dry-run --no-wandb
+
+# Ablation: consistent train/test preprocessing (no phase alignment at all)
+python scripts/compare_reheartnet.py --no-wandb --no-phase-align \
+    --output-dir results/comparison_reheartnet_nophasealign
 ```
 > Path/size auto-detected. Override: `--clef-path models/clef/clef_small.ckpt --clef-size small`
 

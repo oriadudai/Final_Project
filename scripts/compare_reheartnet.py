@@ -181,6 +181,12 @@ def _parse_args() -> argparse.Namespace:
                         "Lets each loss variant be launched as its own process on its own GPU; "
                         "rerun without --only (with --resume) afterward to assemble the comparison.")
     p.add_argument("--dry-run",         action="store_true", help="2 folds, 2 epochs each")
+    p.add_argument("--no-phase-align",  action="store_true",
+                   help="Disable train-only PPG-to-ECG phase alignment (build_group_fold "
+                        "apply_align=False for train too), making train/test preprocessing "
+                        "consistent. Diagnostic/ablation option -- default preserves the "
+                        "Lee et al. train-only-alignment protocol. Saves to a different "
+                        "--output-dir to avoid overwriting the main results.")
     return p.parse_args()
 
 
@@ -241,6 +247,7 @@ def _run_model(
     n_folds = len(splits)
     print(f"\n  loss={loss_type}  |  lr={lr}  |  H={hidden_size}  |  epochs={epochs}  |  folds={n_folds}")
     print(f"  huber_delta={huber_delta}  |  lambda_clinical={lambda_clinical}")
+    print(f"  phase_align(train)={not args.no_phase_align}")
     if window_sec is not None:
         print(f"  window={window_sec}s  overlap={overlap_frac:.0%}  bandpass={apply_bandpass}")
 
@@ -269,7 +276,7 @@ def _run_model(
         _train = train_subs[:5] if args.dry_run else train_subs
         _test  = test_subs[:2]  if args.dry_run else test_subs
         train_ds, test_ds = build_group_fold(
-            _train, _test, apply_align=True,
+            _train, _test, apply_align=not args.no_phase_align,
             window_sec=window_sec, overlap_frac=overlap_frac,
             apply_bandpass=apply_bandpass,
         )

@@ -27,6 +27,9 @@ import argparse
 import os
 import sys
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -77,6 +80,37 @@ def pearson_r(true_arr: np.ndarray, pred_arr: np.ndarray) -> float:
     return float(np.mean(vals)) if vals else float("nan")
 
 
+def plot_examples(true_arr, pred_arr, shifted, lags, n, fs, save_path):
+    """Save a PNG overlaying ground-truth ECG, raw prediction, and shift-corrected
+    prediction for `n` evenly-spaced test windows."""
+    n = min(n, len(true_arr))
+    idx = np.linspace(0, len(true_arr) - 1, n, dtype=int)
+    t = np.arange(true_arr.shape[1]) / fs
+
+    fig, axes = plt.subplots(n, 1, figsize=(12, 2.5 * n), squeeze=False)
+    for row, i in enumerate(idx):
+        ax = axes[row, 0]
+        ax.plot(t, true_arr[i], color="#1f77b4", lw=1.2, label="Ground truth ECG", alpha=0.9)
+        ax.plot(t, pred_arr[i], color="#d62728", lw=1.0, label="Predicted (raw)", alpha=0.7)
+        ax.plot(t, shifted[i],  color="#2ca02c", lw=1.0, label="Predicted (shift-corrected)",
+                alpha=0.85, linestyle="--")
+        ax.set_title(f"window {i}  (best lag = {lags[i]:+d} samples = {lags[i] / fs * 1000:+.0f} ms)",
+                      fontsize=9)
+        ax.set_xlabel("Time (s)", fontsize=8)
+        ax.set_ylabel("Amplitude (z)", fontsize=8)
+        ax.legend(fontsize=8, loc="upper right")
+        ax.grid(True, alpha=0.3)
+
+    fig.suptitle("ECG reconstruction: ground truth vs predicted (raw & shift-corrected)",
+                  fontsize=11, y=1.0)
+    plt.tight_layout()
+    out_dir = os.path.dirname(save_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    plt.savefig(save_path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+
+
 def compute_all_metrics(true_arr, pred_arr, fs, classifier=None, device=None) -> dict:
     metrics = {
         "rmse":            compute_rmse(true_arr, pred_arr),
@@ -105,6 +139,11 @@ def main():
     ap.add_argument("--clef-size", type=str, default="auto",
                      choices=["auto", "small", "medium", "large"])
     ap.add_argument("--clef-dir", type=str, default=config.CLEF_CHECKPOINT_DIR)
+    ap.add_argument("--plot-windows", type=int, default=0,
+                     help="If >0, save a PNG comparing ground truth / raw pred / "
+                          "shift-corrected pred for this many evenly-spaced windows.")
+    ap.add_argument("--plot-out", type=str, default=None,
+                     help="Output PNG path (default: results/diag_phase_shift_<model_key>_fold<NN>.png)")
     args = ap.parse_args()
 
     device = config.DEVICE
@@ -174,6 +213,13 @@ def main():
     for h, e in zip(hist, edges):
         bar = "#" * int(h * 60 / max(1, hist.max()))
         print(f"  {e:6.0f}: {bar} ({h})")
+
+    if args.plot_windows > 0:
+        plot_path = args.plot_out or os.path.join(
+            "results", f"diag_phase_shift_{args.model_key}_fold{args.fold:02d}.png"
+        )
+        plot_examples(true_arr, pred_arr, shifted, lags, args.plot_windows, config.FS, plot_path)
+        print(f"\nSaved comparison plot: {plot_path}")
 
 
 if __name__ == "__main__":
