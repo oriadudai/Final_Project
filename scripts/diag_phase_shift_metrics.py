@@ -29,6 +29,16 @@ Three modes:
                                      raw vs shift-corrected pred for the same
                                      test window (cropped to 4 s for clef),
                                      saved to <results-dir>/figures/
+  --model-key --train-vs-test       every fold of one variant: evaluate the
+                                     saved checkpoint on its OWN (phase-aligned)
+                                     training data as well as the (unaligned)
+                                     test data, to tell apart "model never
+                                     learned anything" from "model learned the
+                                     aligned distribution but the train/test
+                                     alignment mismatch hurts at test time".
+                                     Saved to <results-dir>/<model_key>/
+                                     diag_phase_shift/fold_NN_train_vs_test.json
+                                     + train_vs_test_summary.json
 
 Usage:
     python scripts/diag_phase_shift_metrics.py \
@@ -54,7 +64,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import core.config as config
-from core.data_loader import build_test_dataset, get_cv_splits
+from core.data_loader import build_group_fold, build_test_dataset, get_cv_splits
 from core.models.baselines import get_model
 from core.metrics.clinical_metrics import (
     compute_rmse,
@@ -336,6 +346,87 @@ def run_all_folds(args, device) -> None:
     print(f"\nSaved aggregate summary: {summary_path}")
 
 
+def run_train_vs_test(args, device) -> None:
+    """For one ReHeartNet variant, every fold: evaluate the saved checkpoint on
+    its OWN (phase-aligned) training data as well as the (unaligned) test data.
+
+    Disambiguates two failure modes when test metrics look degenerate:
+      - train metrics ALSO degenerate -> the model never learned a useful
+        PPG->ECG mapping (e.g. training collapse from lr=1e-2 instability),
+        independent of any train/test alignment mismatch.
+      - train metrics good, test metrics degenerate -> consistent with the
+        train-only phase alignment causing a real train/test distribution
+        shift (see module docstring).
+    """
+    model_key = args.model_key
+    out_dir = os.path.join(args.results_dir, model_key, "diag_phase_shift")
+    os.makedirs(out_dir, exist_ok=True)
+
+    classifier = _maybe_classifier(model_key, args, device)
+
+    all_subjects = get_all_record_names()
+    splits = get_cv_splits(all_subjects, n_splits=args.n_folds,
+                            save_path=os.path.join("results", "_diag_fold_assignments.json"))
+
+    pp = PREPROC[model_key]
+    per_fold = []
+
+    for fold in range(args.n_folds):
+        ckpt_path = _checkpoint_path(args.results_dir, model_key, fold)
+        if not os.path.exists(ckpt_path):
+            print(f"  fold {fold:02d}: checkpoint not found ({ckpt_path}), skipping")
+            continue
+
+        model, ckpt = _load_model(ckpt_path, device)
+        train_subs, test_subs = splits[fold]
+        # Same train-only phase-aligned data the model was actually fit on.
+        train_ds, test_ds = build_group_fold(train_subs, test_subs, apply_align=True, **pp)
+
+        train_true, train_pred = _run_inference(model, train_ds, device)
+        test_true, test_pred   = _run_inference(model, test_ds, device)
+
+        train_metrics = compute_all_metrics(train_true, train_pred, config.FS, classifier, device)
+        test_raw      = compute_all_metrics(test_true, test_pred, config.FS, classifier, device)
+        shifted, lags = _shift_correct_all(test_true, test_pred, args.max_lag)
+        test_shift    = compute_all_metrics(test_true, shifted, config.FS, classifier, device)
+
+        result = {
+            "fold":                fold,
+            "checkpoint_epoch":    ckpt["epoch"],
+            "checkpoint_val_loss": ckpt["val_loss"],
+            "n_train_windows":     int(train_true.shape[0]),
+            "n_test_windows":      int(test_true.shape[0]),
+            "train_metrics":                train_metrics,
+            "test_metrics_raw":             test_raw,
+            "test_metrics_shift_corrected": test_shift,
+        }
+        per_fold.append(result)
+        with open(os.path.join(out_dir, f"fold_{fold:02d}_train_vs_test.json"), "w") as f:
+            json.dump(result, f, indent=2)
+
+        print(f"  fold {fold:02d} (epoch {ckpt['epoch']}, val_loss {ckpt['val_loss']:.5f}): "
+              f"train rmse={train_metrics['rmse']:.4f} prd={train_metrics['prd']:.2f}  |  "
+              f"test rmse={test_raw['rmse']:.4f}->{test_shift['rmse']:.4f} "
+              f"prd={test_raw['prd']:.2f}->{test_shift['prd']:.2f}")
+
+    if not per_fold:
+        print("No checkpoints found -- nothing to summarize.")
+        return
+
+    summary = {"n_folds": len(per_fold), "train": {}, "test_raw": {}, "test_shift_corrected": {}}
+    for key in per_fold[0]["train_metrics"]:
+        for label, src_key in (("train", "train_metrics"),
+                                ("test_raw", "test_metrics_raw"),
+                                ("test_shift_corrected", "test_metrics_shift_corrected")):
+            mean, margin = _mean_ci([r[src_key].get(key, float("nan")) for r in per_fold])
+            summary[label][key] = {"mean": mean, "ci95": margin}
+
+    summary_path = os.path.join(out_dir, "train_vs_test_summary.json")
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"\nSaved: {summary_path}")
+
+
 def run_compare_models(args, device) -> None:
     out_dir = os.path.join(args.results_dir, "figures")
     os.makedirs(out_dir, exist_ok=True)
@@ -423,6 +514,12 @@ def main():
                           "huber/clef), each showing GT vs raw vs shift-corrected pred "
                           "for the same test window (cropped to 4s for clef), to "
                           "<results-dir>/figures/.")
+    ap.add_argument("--train-vs-test", action="store_true",
+                     help="For every fold of --model-key, evaluate the saved checkpoint "
+                          "on its own (phase-aligned) training data as well as the "
+                          "(unaligned) test data. Saved to <results-dir>/<model_key>/"
+                          "diag_phase_shift/fold_NN_train_vs_test.json + "
+                          "train_vs_test_summary.json")
     ap.add_argument("--results-dir", type=str, default=os.path.join("results", "comparison_reheartnet"),
                      help="Base directory holding <model_key>/checkpoints/ "
                           "(default: results/comparison_reheartnet)")
@@ -433,6 +530,10 @@ def main():
 
     if args.compare_models:
         run_compare_models(args, device)
+    elif args.train_vs_test:
+        if args.model_key is None:
+            raise SystemExit("--train-vs-test requires --model-key")
+        run_train_vs_test(args, device)
     elif args.all_folds:
         if args.model_key is None:
             raise SystemExit("--all-folds requires --model-key")
