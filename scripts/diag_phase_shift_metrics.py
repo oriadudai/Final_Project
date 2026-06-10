@@ -1,4 +1,4 @@
-"""Diagnostic: shift-corrected PRD / Pearson r for a saved ReHeartNet checkpoint.
+"""Diagnostic: shift-corrected clinical metrics for a saved ReHeartNet checkpoint.
 
 Tests whether the model has learned the correct ECG rhythm/shape but is
 phase-shifted relative to ground truth at test time -- a predicted
@@ -7,8 +7,16 @@ consequence of build_group_fold's train-only phase alignment
 
 For each test window, brute-force searches shifts of `pred` in
 [-max_lag, +max_lag] samples, picks the shift that minimises
-sum((true - roll(pred, k))^2), and reports PRD / Pearson r before vs after
-shift-correction, plus the distribution of chosen shifts.
+sum((true - roll(pred, k))^2), and reports the FULL clinical metric set
+(RMSE, PRD, Pearson r, EMD, KS, beat-timing MAE, and -- for the CLEF/10s
+model only -- BCE) before vs after shift-correction, plus the distribution
+of chosen shifts.
+
+BCE is skipped for the 4 s-window models (original/huber): CLEFClassifier
+resamples its input to a fixed 5000 samples assuming a 10 s/500 Hz signal,
+so it can't be applied correctly to 4 s/500-sample windows without building
+a separately-windowed 10 s dataset (whose window boundaries -- and thus
+per-window shift lags -- wouldn't match the native 4 s windows used here).
 
 Usage:
     python scripts/diag_phase_shift_metrics.py \
@@ -28,7 +36,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import core.config as config
 from core.data_loader import build_test_dataset, get_cv_splits
 from core.models.baselines import get_model
-from core.metrics.clinical_metrics import compute_prd
+from core.metrics.clinical_metrics import (
+    compute_rmse,
+    compute_prd,
+    compute_emd,
+    compute_ks,
+    compute_beat_timing_mae,
+    compute_bce,
+)
+from core.models.ptbxl_classifier import build_classifier
+from core.losses.composite_loss import load_clef_encoder
 from src.preprocessing import get_all_record_names
 
 # Must match the preprocessing settings for each variant in
@@ -60,12 +77,34 @@ def pearson_r(true_arr: np.ndarray, pred_arr: np.ndarray) -> float:
     return float(np.mean(vals)) if vals else float("nan")
 
 
+def compute_all_metrics(true_arr, pred_arr, fs, classifier=None, device=None) -> dict:
+    metrics = {
+        "rmse":            compute_rmse(true_arr, pred_arr),
+        "prd":             compute_prd(true_arr, pred_arr),
+        "pearson_r":       pearson_r(true_arr, pred_arr),
+        "emd":             compute_emd(true_arr, pred_arr, fs=fs),
+    }
+    ks_stat, ks_pval = compute_ks(true_arr, pred_arr, fs=fs)
+    metrics["ks_stat"]   = ks_stat
+    metrics["ks_pvalue"] = ks_pval
+    metrics["beat_timing_mae"] = compute_beat_timing_mae(true_arr, pred_arr, fs=fs)
+    if classifier is not None:
+        metrics["bce"] = compute_bce(true_arr, pred_arr, classifier, device)
+    return metrics
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--model-key", required=True, choices=list(PREPROC))
     ap.add_argument("--fold", type=int, required=True)
     ap.add_argument("--max-lag", type=int, default=125)
+    ap.add_argument("--clef-path", type=str, default=None,
+                     help="Path to CLEF .ckpt for BCE (CLEF model only). "
+                          "If omitted, auto-constructs from --clef-dir/--clef-size.")
+    ap.add_argument("--clef-size", type=str, default="auto",
+                     choices=["auto", "small", "medium", "large"])
+    ap.add_argument("--clef-dir", type=str, default=config.CLEF_CHECKPOINT_DIR)
     args = ap.parse_args()
 
     device = config.DEVICE
@@ -98,21 +137,36 @@ def main():
     pred_arr = np.concatenate(all_pred, axis=0)
     print(f"test windows: {true_arr.shape[0]}  window length: {true_arr.shape[1]}")
 
-    # Raw metrics (should match the value reported in summary.json for this fold)
-    prd_raw = compute_prd(true_arr, pred_arr)
-    r_raw   = pearson_r(true_arr, pred_arr)
+    # BCE only meaningful for native 10 s windows (CLEFClassifier resamples to a
+    # fixed 5000 samples assuming 10 s/500 Hz input).
+    classifier = None
+    if args.model_key == "reheartnet_clef":
+        if args.clef_size == "auto":
+            args.clef_size = "medium" if device.type == "cuda" else "small"
+        if args.clef_path is None:
+            args.clef_path = os.path.join(args.clef_dir, f"clef_{args.clef_size}.ckpt")
+        print(f"Loading CLEF encoder ({args.clef_size}) from {args.clef_path} ...")
+        clef_encoder = load_clef_encoder(args.clef_path, args.clef_size, device)
+        classifier = build_classifier(clef_encoder).to(device)
+    else:
+        print("BCE skipped (4s-window model -- see module docstring).")
 
-    # Shift-corrected metrics
+    # Shift-corrected predictions
     shifted = np.empty_like(pred_arr)
     lags = np.empty(len(pred_arr), dtype=int)
     for i in range(len(pred_arr)):
         shifted[i], lags[i] = best_shift(pred_arr[i], true_arr[i], args.max_lag)
-    prd_shift = compute_prd(true_arr, shifted)
-    r_shift   = pearson_r(true_arr, shifted)
+
+    metrics_raw   = compute_all_metrics(true_arr, pred_arr, config.FS, classifier, device)
+    metrics_shift = compute_all_metrics(true_arr, shifted,  config.FS, classifier, device)
 
     print(f"\n=== {args.model_key}  fold {args.fold} ===")
-    print(f"PRD       raw={prd_raw:.2f}%   shift-corrected={prd_shift:.2f}%")
-    print(f"Pearson r raw={r_raw:.4f}     shift-corrected={r_shift:.4f}")
+    print(f"{'metric':<16}{'raw':>12}{'shift-corrected':>18}")
+    for key in ["rmse", "prd", "pearson_r", "emd", "ks_stat", "ks_pvalue", "beat_timing_mae", "bce"]:
+        if key not in metrics_raw:
+            continue
+        print(f"{key:<16}{metrics_raw[key]:>12.4f}{metrics_shift[key]:>18.4f}")
+
     print(f"\nLag distribution (samples, +/-{args.max_lag}):")
     print(f"  mean={lags.mean():.1f}  std={lags.std():.1f}  "
           f"min={lags.min()}  max={lags.max()}")
