@@ -20,16 +20,19 @@ fold's test subjects:
      an eval slice (the rest).
   3. BASELINE: evaluate the unmodified checkpoint on the eval slice.
   4. CALIBRATE: fine-tune a copy of the checkpoint on the calibration slice
-     (--calib-epochs, reusing train_one_epoch). Models trained with
-     loss_type="clef" (reheartnet_clef, arch_reheartnet) are calibrated with
-     the SAME composite objective used in training -- Huber(delta=
-     --huber-delta) + --lambda-clinical * CLEF feature loss, via
-     ClinicalCompositeLoss -- so calibration doesn't fine-tune away the
-     CLEF-learned rhythm structure that gives these models their EMD/KS edge
-     (see project_clef_calibration_emd_tradeoff, where Huber-only calibration
-     of arch_reheartnet improved PRD/r but degraded EMD/KS). mse/huber-trained
-     models still use Huber-only, per a prior mse-vs-huber calibration sweep
-     that found near-identical results for those.
+     (--calib-epochs, reusing train_one_epoch). By default (--calib-loss
+     auto), models trained with loss_type="clef" (reheartnet_clef,
+     arch_reheartnet) are calibrated with the SAME composite objective used
+     in training -- Huber(delta=--huber-delta) + --lambda-clinical * CLEF
+     feature loss, via ClinicalCompositeLoss -- so calibration doesn't
+     fine-tune away the CLEF-learned rhythm structure that gives these models
+     their EMD/KS edge (see project_clef_calibration_emd_tradeoff, where
+     Huber-only calibration of arch_reheartnet improved PRD/r but degraded
+     EMD/KS). mse/huber-trained models default to Huber-only, per a prior
+     mse-vs-huber calibration sweep that found near-identical results for
+     those. --calib-loss huber/composite overrides this choice for ALL
+     --models, e.g. to test whether the CLEF feature loss helps calibration
+     even for a model that was never trained with it.
   5. CALIBRATED: re-evaluate on the same eval slice.
 
 Reports, per model, RMSE/PRD/pearson_r/EMD/KS/beat_timing_mae pooled across
@@ -115,10 +118,16 @@ def main():
     ap.add_argument("--huber-delta", type=float, default=1.71377251715061,
                     help="Delta for the Huber loss used in calibration fine-tuning "
                          "(Huber-only models, and the Huber term of the composite loss).")
+    ap.add_argument("--calib-loss", type=str, default="auto", choices=["auto", "huber", "composite"],
+                    help="Calibration objective for ALL --models. 'auto' (default): "
+                         "composite for loss_type='clef' models, Huber-only otherwise. "
+                         "'huber'/'composite' force that choice for every model, e.g. "
+                         "to test composite calibration on an mse/huber-trained model.")
     ap.add_argument("--lambda-clinical", type=float, default=None,
                     help="Weight for the CLEF feature-matching term in the composite "
-                         "calibration loss (loss_type='clef' models only). Default: "
-                         "read from results/best_hyperparams.json, falling back to "
+                         "calibration loss (used whenever composite calibration is "
+                         "active, per --calib-loss). Default: read from "
+                         "results/best_hyperparams.json, falling back to "
                          "config.LAMBDA_CLINICAL.")
     ap.add_argument("--clef-path", type=str, default=None)
     ap.add_argument("--clef-dir", type=str, default=config.CLEF_CHECKPOINT_DIR)
@@ -133,8 +142,8 @@ def main():
     print(f"Common test windows: window_sec={args.window_sec or config.WINDOW_SIZE}  "
           f"overlap={args.overlap_frac:.0%}  bandpass={args.apply_bandpass}")
     print(f"calib_frac={args.calib_frac}  calib_epochs={args.calib_epochs}  "
-          f"calib_lr={args.calib_lr}  huber_delta={args.huber_delta} "
-          f"(calibration loss is per-model -- see below)")
+          f"calib_lr={args.calib_lr}  huber_delta={args.huber_delta}  "
+          f"calib_loss={args.calib_loss} (per-model resolution -- see below)")
 
     fold_assignments_path = args.fold_assignments or os.path.join(args.results_dir, "fold_assignments.json")
     with open(fold_assignments_path) as f:
@@ -151,9 +160,14 @@ def main():
         cfg = MODELS.get(model_key) or EXTRA_MODELS.get(model_key) or {}
         return cfg.get("loss_type")
 
+    def _calib_loss_kind(model_key):
+        if args.calib_loss == "auto":
+            return "composite" if _loss_type(model_key) == "clef" else "huber"
+        return args.calib_loss
+
     huber_criterion = nn.HuberLoss(delta=args.huber_delta)
     clef_criterion = None
-    if any(_loss_type(k) == "clef" for k in model_keys):
+    if any(_calib_loss_kind(k) == "composite" for k in model_keys):
         if args.lambda_clinical is None:
             best_hp_path = os.path.join("results", "best_hyperparams.json")
             if os.path.exists(best_hp_path):
@@ -193,10 +207,12 @@ def main():
             continue
         print(f"\n{'-'*60}\n  Model: {label}\n{'-'*60}")
 
-        if model_cfg.get("loss_type") == "clef":
+        if _calib_loss_kind(model_key) == "composite":
             criterion = clef_criterion
+            note = "" if model_cfg.get("loss_type") == "clef" else \
+                f"  [forced via --calib-loss; model trained with loss_type={model_cfg.get('loss_type')!r}]"
             print(f"  Calibration loss: Huber(delta={args.huber_delta}) + "
-                  f"{args.lambda_clinical} * CLEF feature loss")
+                  f"{args.lambda_clinical} * CLEF feature loss{note}")
         else:
             criterion = huber_criterion
             print(f"  Calibration loss: Huber(delta={args.huber_delta})")
