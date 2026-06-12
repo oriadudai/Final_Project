@@ -133,7 +133,8 @@ def main():
     print(f"Common test windows: window_sec={args.window_sec or config.WINDOW_SIZE}  "
           f"overlap={args.overlap_frac:.0%}  bandpass={args.apply_bandpass}")
     print(f"calib_frac={args.calib_frac}  calib_epochs={args.calib_epochs}  "
-          f"calib_lr={args.calib_lr}  fine-tune loss=Huber(delta={args.huber_delta})")
+          f"calib_lr={args.calib_lr}  huber_delta={args.huber_delta} "
+          f"(calibration loss is per-model -- see below)")
 
     fold_assignments_path = args.fold_assignments or os.path.join(args.results_dir, "fold_assignments.json")
     with open(fold_assignments_path) as f:

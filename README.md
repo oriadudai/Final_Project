@@ -546,7 +546,12 @@ effect on the main CV pipeline.
   cross-subject failure (PRD≈100%, r≈0) as the architectural ablation; (3) calibration helps all
   three (PRD down, r up) but far less than `diag_subject_calibration.py`'s pilot — attributed to
   these checkpoints' `lr=1e-2` training producing near-constant predictors with little learned
-  structure to personalize, unlike the pilot's Optuna-lr (3.15e-4) checkpoint.
+  structure to personalize, unlike the pilot's Optuna-lr (3.15e-4) checkpoint. For `loss_type="clef"`
+  checkpoints, the calibration fine-tune can additionally use the *same* composite objective as
+  training (`Huber(delta=1.714) + lambda_clinical * CLEF`, `lambda_clinical` read from
+  `results/best_hyperparams.json`) instead of Huber-only — see Section 4.7 of the Final Report for
+  the resulting perception-distortion tradeoff comparison on the `arch_reheartnet` diagnostic
+  checkpoint.
 
 ---
 
