@@ -506,6 +506,50 @@ existing CLEF-based BCE.
 
 ---
 
+## Diagnostic Experiments (our additions, not in Lee et al.)
+
+A set of standalone diagnostic scripts (none of them part of Lee et al.'s protocol) were used to
+explain the loss-ablation results and to develop a generalization mitigation. They all read
+already-saved checkpoints / `fold_assignments.json` and write their own results files, with no
+effect on the main CV pipeline.
+
+- **`diag_batch_size_effect.py`** — re-runs fold 6 at `batch_size ∈ {1, 8, 16}` (lr=1e-2, H=32,
+  everything else unchanged). Confirms that `batch_size=1` (Lee et al.'s spec) is the proximate
+  cause of the near-constant-predictor failure of `reheartnet_original`/`reheartnet_huber`:
+  bs=1's train loss is flat (no net trend), while bs=8/16 show sustained, real loss reduction.
+  Diagnostic only — production runs keep `batch_size=1`.
+- **`diag_phase_align_quality.py`** / **`diag_phase_align_wrap_breakdown.py`** — measure the
+  effect of the train-only phase-alignment step (Cross-Validation Design above, Lee et al.'s
+  documented protocol) on `|corr(PPG, ECG)|` across all 53 subjects. Finding: the circular-shift
+  alignment net-*reduces* `|corr|` for ~57% of windows in both window configurations — a
+  diagnostic characterization of an existing, unchanged preprocessing step, not a proposed change.
+- **`diag_phase_align_traintest.py`** — tests whether the train-aligned/test-unaligned asymmetry
+  (Lee et al.'s documented design — *not* our addition) explains the large val→test performance
+  gap, by also running an "unaligned" condition where train/val/test are all unaligned. Result:
+  **refuted** — the unaligned condition fits train/val much better but test gets slightly worse.
+- **`diag_subject_calibration.py`** — **our addition**. Implements a per-subject calibration
+  protocol: fine-tune a copy of a trained checkpoint on the first `--calib-frac` (chronological)
+  of a test subject's windows, then evaluate on the remaining windows. This closes most of the
+  val→test generalization gap (fold 6, mse_aligned: mean PRD 112%→78%, Pearson r −0.13→+0.64;
+  EMD/KS/beat-timing MAE each improve 36-45%). Not part of Lee et al.'s training or evaluation
+  procedure.
+- **`diag_window_size_metrics.py`** — re-evaluates `reheartnet_original`/`reheartnet_huber`
+  checkpoints on `reheartnet_clef`'s window configuration (10 s / 50% overlap / no bandpass) to
+  isolate how much of their EMD/KS gap to the CLEF variant is a window-size artifact vs. a
+  loss-function effect. Finding: window size explains only ~10-25% of the gap.
+- **`diag_calib_loss_ablation.py`** — combines the above two: head-to-head comparison of the
+  three production loss-ablation checkpoints (`reheartnet_original`/`huber`/`clef`, all 8 folds,
+  `lr=1e-2`) on one common window configuration (10 s / 50% overlap / no bandpass), with and
+  without per-subject calibration. Findings (53 subjects, 8 folds): (1) CLEF's ~3x EMD/KS
+  advantage over original/Huber holds even on identical windows, confirming the loss function —
+  not window size — drives it; (2) all three checkpoints show the same near-constant-predictor
+  cross-subject failure (PRD≈100%, r≈0) as the architectural ablation; (3) calibration helps all
+  three (PRD down, r up) but far less than `diag_subject_calibration.py`'s pilot — attributed to
+  these checkpoints' `lr=1e-2` training producing near-constant predictors with little learned
+  structure to personalize, unlike the pilot's Optuna-lr (3.15e-4) checkpoint.
+
+---
+
 ## Configuration
 
 [core/config.py](core/config.py) — parameters confirmed in Lee et al. vs. our defaults:

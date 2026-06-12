@@ -31,9 +31,20 @@ all available subjects/folds, baseline vs calibrated -- a fair comparison of
 the three loss functions under one test protocol, both as population models
 and after personalization.
 
+In addition to the three `compare_reheartnet.MODELS` keys, `--models` also
+accepts keys from EXTRA_MODELS below -- checkpoints produced by run_cv.py
+(not compare_reheartnet.py), which live at a fixed `checkpoints/` path keyed
+only by model_name + fold, independent of --results-dir. This lets e.g.
+arch_reheartnet (ReHeartNet+CLEF trained at Optuna's lr, the architectural-
+ablation checkpoint) be compared against reheartnet_original/reheartnet_huber
+re-trained at the same Optuna lr (see --results-dir override).
+
 Usage:
     python scripts/diag_calib_loss_ablation.py
     python scripts/diag_calib_loss_ablation.py --folds 0,1 --models reheartnet_clef
+    python scripts/diag_calib_loss_ablation.py \\
+        --results-dir results/comparison_reheartnet_optunalr \\
+        --models reheartnet_original,reheartnet_huber,arch_reheartnet
 """
 import argparse
 import json
@@ -57,6 +68,18 @@ from compare_reheartnet import MODELS
 from diag_subject_calibration import quick_metrics
 
 AGG_KEYS = ("rmse", "prd", "pearson_r", "emd", "ks_stat", "beat_timing_mae")
+
+# Models trained via run_cv.py rather than compare_reheartnet.py: checkpoints
+# land in the single fixed config.CHECKPOINT_DIR ("checkpoints/"), named only
+# by model_name + fold -- NOT under {results_dir}/{model_key}/checkpoints/.
+EXTRA_MODELS = {
+    "arch_reheartnet": {
+        "label": "ReHeartNet + CLEF (Optuna lr, arch ablation)",
+        "ckpt_path": lambda fold_idx: os.path.join(
+            config.CHECKPOINT_DIR, f"reheartnet_fold_{fold_idx:02d}_best.pt"),
+        "hidden_size": config.HIDDEN_SIZE,
+    },
+}
 
 
 def _mean(per_subject, split, key):
@@ -109,25 +132,35 @@ def main():
 
     results = {}
     for model_key in model_keys:
-        if model_key not in MODELS:
-            print(f"\nSkipping unknown model key: {model_key} (not in compare_reheartnet.MODELS)")
+        if model_key in MODELS:
+            model_cfg = MODELS[model_key]
+            label = model_cfg["label"]
+            default_hidden_size = model_cfg.get("hidden_size", config.HIDDEN_SIZE)
+            ckpt_path_fn = lambda fold_idx, _mk=model_key: os.path.join(
+                args.results_dir, _mk, "checkpoints", f"reheartnet_fold_{fold_idx:02d}_best.pt")
+        elif model_key in EXTRA_MODELS:
+            model_cfg = EXTRA_MODELS[model_key]
+            label = model_cfg["label"]
+            default_hidden_size = model_cfg.get("hidden_size", config.HIDDEN_SIZE)
+            ckpt_path_fn = model_cfg["ckpt_path"]
+        else:
+            print(f"\nSkipping unknown model key: {model_key} "
+                  f"(not in compare_reheartnet.MODELS or EXTRA_MODELS)")
             continue
-        model_cfg = MODELS[model_key]
-        print(f"\n{'-'*60}\n  Model: {model_cfg['label']}\n{'-'*60}")
+        print(f"\n{'-'*60}\n  Model: {label}\n{'-'*60}")
 
         per_subject = []
         for fold_key in fold_keys:
             fold_idx = int(fold_key.split("_")[1])
             test_subs = assignments[fold_key]["test"]
 
-            ckpt_path = os.path.join(args.results_dir, model_key, "checkpoints",
-                                      f"reheartnet_fold_{fold_idx:02d}_best.pt")
+            ckpt_path = ckpt_path_fn(fold_idx)
             if not os.path.exists(ckpt_path):
                 print(f"  fold {fold_idx:02d}: checkpoint not found ({ckpt_path}), skipping.")
                 continue
 
             ckpt = torch.load(ckpt_path, map_location=device)
-            hidden_size = ckpt.get("hidden_size", model_cfg.get("hidden_size", config.HIDDEN_SIZE))
+            hidden_size = ckpt.get("hidden_size", default_hidden_size)
 
             for subj in test_subs:
                 ds = build_test_dataset([subj], window_sec=args.window_sec,
@@ -183,7 +216,7 @@ def main():
                   f"EMD={m['emd']:.4f}  KS={m['ks_stat']:.3f}  beat-MAE={m['beat_timing_mae']:.4f}s")
 
         results[model_key] = {
-            "label": model_cfg["label"], "n_subjects": len(per_subject), "n_folds": n_folds_used,
+            "label": label, "n_subjects": len(per_subject), "n_folds": n_folds_used,
             "per_subject": per_subject, "aggregate": aggregate,
         }
 

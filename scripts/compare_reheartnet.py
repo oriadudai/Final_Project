@@ -175,6 +175,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--early-stop-patience", type=int, default=None,
                    help="Stop a fold early after N epochs without val-loss improvement (paper default: None = run all epochs)")
     p.add_argument("--batch-size",      type=int, default=None)
+    p.add_argument("--lr",              type=float, default=None,
+                   help="Override training learning rate for all selected models "
+                        "(top priority -- beats model_cfg's pinned lr and Optuna's "
+                        "tuned lr). Diagnostic option: e.g. retrain reheartnet_original/"
+                        "reheartnet_huber at Optuna's lr instead of the paper's 1e-2. "
+                        "Save to a different --output-dir to avoid overwriting the "
+                        "lr=1e-2 production checkpoints.")
     p.add_argument("--resume",          action="store_true", help="Resume from existing partial results")
     p.add_argument("--only",            type=str, default=None,
                    help="Comma-separated subset of model keys to run (e.g. 'reheartnet_clef'). "
@@ -213,9 +220,10 @@ def _run_model(
     Hyperparameter priority (highest -> lowest):
       args CLI override  >  model_cfg explicit value  >  best_params (Optuna)  >  config default
 
-    CLI overrides (--epochs, --early-stop-patience, --batch-size) take top priority
-    so that a long paper-spec run (epochs=1000, no early stopping) can be deliberately
-    scaled down for tractability without editing MODELS.
+    CLI overrides (--epochs, --early-stop-patience, --batch-size, --lr) take top
+    priority so that a long paper-spec run (epochs=1000, no early stopping) can be
+    deliberately scaled down for tractability, or its lr overridden for a diagnostic
+    re-run, without editing MODELS.
 
     For reheartnet_original, use_optuna=False so best_params is never consulted —
     only paper-specified values (in model_cfg) or config defaults are used.
@@ -226,7 +234,8 @@ def _run_model(
     epochs      = args.epochs     or model_cfg.get("epochs")     or int(hp.get("epochs",           config.EPOCHS))
     batch_size  = args.batch_size or model_cfg.get("batch_size") or int(hp.get("batch_size",       config.BATCH_SIZE))
     hidden_size = model_cfg.get("hidden_size") or                   int(hp.get("hidden_size",      config.HIDDEN_SIZE))
-    lr          = model_cfg.get("lr")         or                  float(hp.get("lr",               config.LEARNING_RATE))
+    lr          = args.lr if args.lr is not None else (
+                  model_cfg.get("lr")         or                  float(hp.get("lr",               config.LEARNING_RATE)))
     huber_delta =                                                  float(hp.get("huber_delta",      config.HUBER_DELTA))
     lambda_clinical =                                              float(hp.get("lambda_clinical",  config.LAMBDA_CLINICAL))
 
