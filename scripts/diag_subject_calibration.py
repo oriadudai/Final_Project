@@ -164,7 +164,7 @@ def main():
         print(f"  {split}: RMSE={m['rmse']:.4f}  PRD={m['prd']:6.2f}%  r={m['pearson_r']:+.4f}")
 
     os.makedirs(args.output_dir, exist_ok=True)
-    run_name = f"calib_fold{args.fold:02d}_{args.loss_type}"
+    run_name = f"calib_fold{args.fold:02d}_{args.loss_type}_frac{args.calib_frac:g}"
     summary = {
         "fold": args.fold, "checkpoint": args.checkpoint, "loss_type": args.loss_type,
         "calib_frac": args.calib_frac, "calib_epochs": args.calib_epochs, "calib_lr": args.calib_lr,
