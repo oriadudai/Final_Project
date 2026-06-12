@@ -118,11 +118,16 @@ def main():
     ap.add_argument("--huber-delta", type=float, default=1.71377251715061,
                     help="Delta for the Huber loss used in calibration fine-tuning "
                          "(Huber-only models, and the Huber term of the composite loss).")
-    ap.add_argument("--calib-loss", type=str, default="auto", choices=["auto", "huber", "composite"],
+    ap.add_argument("--calib-loss", type=str, default="auto",
+                    choices=["auto", "huber", "mse", "composite", "clef-only"],
                     help="Calibration objective for ALL --models. 'auto' (default): "
                          "composite for loss_type='clef' models, Huber-only otherwise. "
-                         "'huber'/'composite' force that choice for every model, e.g. "
-                         "to test composite calibration on an mse/huber-trained model.")
+                         "'huber'/'mse': pure distortion losses (Huber(--huber-delta) "
+                         "or plain MSE). 'composite': Huber + lambda*CLEF (the training "
+                         "objective for loss_type='clef' models). 'clef-only': pure "
+                         "CLEF feature-matching loss (huber_weight=0), the opposite "
+                         "extreme from 'huber'/'mse'. Any of these can be forced for "
+                         "ALL --models regardless of how they were trained.")
     ap.add_argument("--lambda-clinical", type=float, default=None,
                     help="Weight for the CLEF feature-matching term in the composite "
                          "calibration loss (used whenever composite calibration is "
@@ -166,8 +171,11 @@ def main():
         return args.calib_loss
 
     huber_criterion = nn.HuberLoss(delta=args.huber_delta)
+    mse_criterion = nn.MSELoss()
     clef_criterion = None
-    if any(_calib_loss_kind(k) == "composite" for k in model_keys):
+    clef_only_criterion = None
+    needed_kinds = {_calib_loss_kind(k) for k in model_keys}
+    if needed_kinds & {"composite", "clef-only"}:
         if args.lambda_clinical is None:
             best_hp_path = os.path.join("results", "best_hyperparams.json")
             if os.path.exists(best_hp_path):
@@ -184,9 +192,14 @@ def main():
         if args.clef_path is None:
             args.clef_path = os.path.join(args.clef_dir, f"clef_{args.clef_size}.ckpt")
             print(f"CLEF path auto-set: {args.clef_path}")
-        print(f"Loading CLEF encoder ({args.clef_size}) for composite calibration ...")
+        print(f"Loading CLEF encoder ({args.clef_size}) for composite/clef-only calibration ...")
         clef_encoder = load_clef_encoder(args.clef_path, args.clef_size, device)
-        clef_criterion = ClinicalCompositeLoss(clef_encoder, args.lambda_clinical, args.huber_delta).to(device)
+        if "composite" in needed_kinds:
+            clef_criterion = ClinicalCompositeLoss(
+                clef_encoder, args.lambda_clinical, args.huber_delta, huber_weight=1.0).to(device)
+        if "clef-only" in needed_kinds:
+            clef_only_criterion = ClinicalCompositeLoss(
+                clef_encoder, args.lambda_clinical, args.huber_delta, huber_weight=0.0).to(device)
 
     results = {}
     for model_key in model_keys:
@@ -207,15 +220,28 @@ def main():
             continue
         print(f"\n{'-'*60}\n  Model: {label}\n{'-'*60}")
 
-        if _calib_loss_kind(model_key) == "composite":
+        calib_loss_kind = _calib_loss_kind(model_key)
+        auto_kind = "composite" if model_cfg.get("loss_type") == "clef" else "huber"
+        if args.calib_loss != "auto" and calib_loss_kind != auto_kind:
+            forced_note = (f"  [non-default for this model; loss_type="
+                            f"{model_cfg.get('loss_type')!r}, auto would use {auto_kind!r}]")
+        else:
+            forced_note = ""
+
+        if calib_loss_kind == "composite":
             criterion = clef_criterion
-            note = "" if model_cfg.get("loss_type") == "clef" else \
-                f"  [forced via --calib-loss; model trained with loss_type={model_cfg.get('loss_type')!r}]"
             print(f"  Calibration loss: Huber(delta={args.huber_delta}) + "
-                  f"{args.lambda_clinical} * CLEF feature loss{note}")
+                  f"{args.lambda_clinical} * CLEF feature loss{forced_note}")
+        elif calib_loss_kind == "clef-only":
+            criterion = clef_only_criterion
+            print(f"  Calibration loss: {args.lambda_clinical} * CLEF feature loss only "
+                  f"(huber_weight=0){forced_note}")
+        elif calib_loss_kind == "mse":
+            criterion = mse_criterion
+            print(f"  Calibration loss: MSE{forced_note}")
         else:
             criterion = huber_criterion
-            print(f"  Calibration loss: Huber(delta={args.huber_delta})")
+            print(f"  Calibration loss: Huber(delta={args.huber_delta}){forced_note}")
 
         per_subject = []
         for fold_key in fold_keys:

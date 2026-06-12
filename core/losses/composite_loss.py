@@ -41,7 +41,11 @@ def load_clef_encoder(ckpt_path: str, model_size: str = "small", device=None):
 class ClinicalCompositeLoss(nn.Module):
     """Huber loss + CLEF perceptual feature-matching loss.
 
-    L_total = HuberLoss(pred, true) + lambda_clinical * ||Φ(true) - Φ(pred)||²
+    L_total = huber_weight * HuberLoss(pred, true) + lambda_clinical * ||Φ(true) - Φ(pred)||²
+
+    huber_weight defaults to 1.0 (the standard composite loss used for
+    training). Setting huber_weight=0.0 gives a pure CLEF feature-matching
+    loss -- useful for calibration-loss ablations.
 
     Φ is a frozen pretrained CLEF encoder. The CLEF preprocessing pipeline
     (resample 125→500 Hz, bandpass 0.67-40 Hz, per-window z-score) runs inside
@@ -62,10 +66,12 @@ class ClinicalCompositeLoss(nn.Module):
         clef_encoder: nn.Module,
         lambda_clinical: float = 0.1,
         huber_delta: float = 1.0,
+        huber_weight: float = 1.0,
     ):
         super().__init__()
         self.clef_encoder = clef_encoder  # already frozen by load_clef_encoder
         self.lambda_clinical = lambda_clinical
+        self.huber_weight = huber_weight
         self.huber = nn.HuberLoss(delta=huber_delta)
 
         # IIR filter for the non-differentiable true path (500 Hz, 0.67–40 Hz)
@@ -150,7 +156,7 @@ class ClinicalCompositeLoss(nn.Module):
         phi_pred = self.clef_encoder(self._to_clef_input_diff(pred_ecg))
 
         clinical_loss = torch.mean((phi_true - phi_pred) ** 2)
-        total = huber_loss + self.lambda_clinical * clinical_loss
+        total = self.huber_weight * huber_loss + self.lambda_clinical * clinical_loss
 
         # Expose components so callers can log them to wandb
         self.last_huber_loss = float(huber_loss.detach())
