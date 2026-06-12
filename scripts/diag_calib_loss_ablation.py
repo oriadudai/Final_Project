@@ -20,10 +20,16 @@ fold's test subjects:
      an eval slice (the rest).
   3. BASELINE: evaluate the unmodified checkpoint on the eval slice.
   4. CALIBRATE: fine-tune a copy of the checkpoint on the calibration slice
-     (Huber loss, --calib-epochs, reusing train_one_epoch). Huber is used for
-     ALL models regardless of original training loss -- a prior mse-vs-huber
-     calibration sweep found near-identical results, and this avoids needing
-     the CLEF encoder for the fine-tuning objective.
+     (--calib-epochs, reusing train_one_epoch). Models trained with
+     loss_type="clef" (reheartnet_clef, arch_reheartnet) are calibrated with
+     the SAME composite objective used in training -- Huber(delta=
+     --huber-delta) + --lambda-clinical * CLEF feature loss, via
+     ClinicalCompositeLoss -- so calibration doesn't fine-tune away the
+     CLEF-learned rhythm structure that gives these models their EMD/KS edge
+     (see project_clef_calibration_emd_tradeoff, where Huber-only calibration
+     of arch_reheartnet improved PRD/r but degraded EMD/KS). mse/huber-trained
+     models still use Huber-only, per a prior mse-vs-huber calibration sweep
+     that found near-identical results for those.
   5. CALIBRATED: re-evaluate on the same eval slice.
 
 Reports, per model, RMSE/PRD/pearson_r/EMD/KS/beat_timing_mae pooled across
@@ -64,6 +70,7 @@ import core.config as config
 from core.data_loader import build_test_dataset
 from core.models.baselines import get_model
 from core.train import train_one_epoch
+from core.losses.composite_loss import ClinicalCompositeLoss, load_clef_encoder
 from compare_reheartnet import MODELS
 from diag_subject_calibration import quick_metrics
 
@@ -75,6 +82,7 @@ AGG_KEYS = ("rmse", "prd", "pearson_r", "emd", "ks_stat", "beat_timing_mae")
 EXTRA_MODELS = {
     "arch_reheartnet": {
         "label": "ReHeartNet + CLEF (Optuna lr, arch ablation)",
+        "loss_type": "clef",
         "ckpt_path": lambda fold_idx: os.path.join(
             config.CHECKPOINT_DIR, f"reheartnet_fold_{fold_idx:02d}_best.pt"),
         "hidden_size": config.HIDDEN_SIZE,
@@ -105,7 +113,16 @@ def main():
     ap.add_argument("--calib-epochs", type=int, default=20)
     ap.add_argument("--calib-lr", type=float, default=1e-4)
     ap.add_argument("--huber-delta", type=float, default=1.71377251715061,
-                    help="Delta for the Huber loss used in calibration fine-tuning (all models).")
+                    help="Delta for the Huber loss used in calibration fine-tuning "
+                         "(Huber-only models, and the Huber term of the composite loss).")
+    ap.add_argument("--lambda-clinical", type=float, default=None,
+                    help="Weight for the CLEF feature-matching term in the composite "
+                         "calibration loss (loss_type='clef' models only). Default: "
+                         "read from results/best_hyperparams.json, falling back to "
+                         "config.LAMBDA_CLINICAL.")
+    ap.add_argument("--clef-path", type=str, default=None)
+    ap.add_argument("--clef-dir", type=str, default=config.CLEF_CHECKPOINT_DIR)
+    ap.add_argument("--clef-size", type=str, default="auto", choices=["auto", "small", "medium", "large"])
     ap.add_argument("--batch-size", type=int, default=1)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--output-dir", type=str, default=os.path.join("results", "diag_calib_loss_ablation"))
@@ -128,7 +145,33 @@ def main():
     print(f"Folds: {fold_keys}")
 
     model_keys = [k.strip() for k in args.models.split(",")]
-    criterion = nn.HuberLoss(delta=args.huber_delta)
+
+    def _loss_type(model_key):
+        cfg = MODELS.get(model_key) or EXTRA_MODELS.get(model_key) or {}
+        return cfg.get("loss_type")
+
+    huber_criterion = nn.HuberLoss(delta=args.huber_delta)
+    clef_criterion = None
+    if any(_loss_type(k) == "clef" for k in model_keys):
+        if args.lambda_clinical is None:
+            best_hp_path = os.path.join("results", "best_hyperparams.json")
+            if os.path.exists(best_hp_path):
+                with open(best_hp_path) as f:
+                    args.lambda_clinical = float(json.load(f)["lambda_clinical"])
+                print(f"lambda_clinical read from {best_hp_path}: {args.lambda_clinical}")
+            else:
+                args.lambda_clinical = config.LAMBDA_CLINICAL
+                print(f"{best_hp_path} not found; lambda_clinical defaults to "
+                      f"config.LAMBDA_CLINICAL={args.lambda_clinical}")
+        if args.clef_size == "auto":
+            args.clef_size = "medium" if device.type == "cuda" else "small"
+            print(f"CLEF size auto-selected: {args.clef_size}")
+        if args.clef_path is None:
+            args.clef_path = os.path.join(args.clef_dir, f"clef_{args.clef_size}.ckpt")
+            print(f"CLEF path auto-set: {args.clef_path}")
+        print(f"Loading CLEF encoder ({args.clef_size}) for composite calibration ...")
+        clef_encoder = load_clef_encoder(args.clef_path, args.clef_size, device)
+        clef_criterion = ClinicalCompositeLoss(clef_encoder, args.lambda_clinical, args.huber_delta).to(device)
 
     results = {}
     for model_key in model_keys:
@@ -148,6 +191,14 @@ def main():
                   f"(not in compare_reheartnet.MODELS or EXTRA_MODELS)")
             continue
         print(f"\n{'-'*60}\n  Model: {label}\n{'-'*60}")
+
+        if model_cfg.get("loss_type") == "clef":
+            criterion = clef_criterion
+            print(f"  Calibration loss: Huber(delta={args.huber_delta}) + "
+                  f"{args.lambda_clinical} * CLEF feature loss")
+        else:
+            criterion = huber_criterion
+            print(f"  Calibration loss: Huber(delta={args.huber_delta})")
 
         per_subject = []
         for fold_key in fold_keys:
