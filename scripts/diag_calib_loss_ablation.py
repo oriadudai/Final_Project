@@ -283,10 +283,12 @@ def main():
                 calibrated = quick_metrics(model, eval_loader, device)
 
                 print(f"    {subj} (fold{fold_idx:02d}, n={n}): "
+                      f"RMSE {baseline['rmse']:.3f}->{calibrated['rmse']:.3f}  "
                       f"PRD {baseline['prd']:6.2f}%->{calibrated['prd']:6.2f}%  "
                       f"r {baseline['pearson_r']:+.3f}->{calibrated['pearson_r']:+.3f}  "
                       f"EMD {baseline['emd']:.3f}->{calibrated['emd']:.3f}  "
-                      f"KS {baseline['ks_stat']:.3f}->{calibrated['ks_stat']:.3f}")
+                      f"KS {baseline['ks_stat']:.3f}->{calibrated['ks_stat']:.3f}  "
+                      f"beat-MAE {baseline['beat_timing_mae']:.3f}->{calibrated['beat_timing_mae']:.3f}")
 
                 per_subject.append({
                     "fold": fold_idx, "subject": subj, "n_windows": n,
