@@ -23,10 +23,14 @@ For each of the fold's test subjects:
   4. Record CALIBRATED metrics on the same eval slice.
 
 Reports per-subject and aggregate (mean across subjects) baseline vs.
-calibrated metrics. If calibration substantially improves eval PRD/r, that's
-strong evidence the PPG->ECG mapping is subject-specific and a concrete,
-reportable mitigation; if not, the generalization gap is likely something
-deeper than a per-subject offset/scale mismatch.
+calibrated metrics: RMSE/PRD/pearson_r (waveform fidelity) plus
+EMD/KS_stat/beat_timing_mae (rhythm fidelity, computed on RR intervals from
+the eval slice's windows -- see core/metrics/clinical_metrics.py). If
+calibration substantially improves eval PRD/r, that's strong evidence the
+PPG->ECG mapping is subject-specific and a concrete, reportable mitigation;
+if not, the generalization gap is likely something deeper than a per-subject
+offset/scale mismatch. The EMD/KS columns show whether calibration also
+recovers rhythm-timing fidelity, not just waveform amplitude fidelity.
 
 Usage:
     python scripts/diag_subject_calibration.py --fold 6 \\
@@ -45,7 +49,9 @@ from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import core.config as config
 from core.data_loader import build_test_dataset
+from core.metrics.clinical_metrics import compute_beat_timing_mae, compute_emd, compute_ks
 from core.models.baselines import get_model
 from core.train import train_one_epoch
 
@@ -58,13 +64,19 @@ def quick_metrics(model, loader, device):
             pred = model(ppg.to(device)).squeeze(-1).cpu().numpy()
             t_all.append(ecg.squeeze(-1).numpy())
             p_all.append(pred)
-    t = np.concatenate(t_all).ravel()
-    p = np.concatenate(p_all).ravel()
+    t_stack = np.concatenate(t_all, axis=0)  # (N, seq_len)
+    p_stack = np.concatenate(p_all, axis=0)
+    t = t_stack.ravel()
+    p = p_stack.ravel()
     rmse = float(np.sqrt(np.mean((t - p) ** 2)))
     denom = float((t ** 2).sum())
     prd = float(np.sqrt(((t - p) ** 2).sum() / denom) * 100) if denom > 1e-12 else float("nan")
     r = float(np.corrcoef(t, p)[0, 1]) if t.std() > 1e-8 and p.std() > 1e-8 else float("nan")
-    return {"rmse": rmse, "prd": prd, "pearson_r": r}
+    emd = compute_emd(t_stack, p_stack, fs=config.FS)
+    ks_stat, _ = compute_ks(t_stack, p_stack, fs=config.FS)
+    beat_mae = compute_beat_timing_mae(t_stack, p_stack, fs=config.FS)
+    return {"rmse": rmse, "prd": prd, "pearson_r": r,
+            "emd": emd, "ks_stat": ks_stat, "beat_timing_mae": beat_mae}
 
 
 def main():
@@ -142,8 +154,10 @@ def main():
         calibrated = quick_metrics(model, eval_loader, device)
 
         print(f"{subj}: n_windows={n} (calib={n_calib}, eval={n_eval})")
-        print(f"  baseline  : RMSE={baseline['rmse']:.4f}  PRD={baseline['prd']:6.2f}%  r={baseline['pearson_r']:+.4f}")
-        print(f"  calibrated: RMSE={calibrated['rmse']:.4f}  PRD={calibrated['prd']:6.2f}%  r={calibrated['pearson_r']:+.4f}")
+        print(f"  baseline  : RMSE={baseline['rmse']:.4f}  PRD={baseline['prd']:6.2f}%  r={baseline['pearson_r']:+.4f}  "
+              f"EMD={baseline['emd']:.4f}  KS={baseline['ks_stat']:.3f}  beat-MAE={baseline['beat_timing_mae']:.4f}s")
+        print(f"  calibrated: RMSE={calibrated['rmse']:.4f}  PRD={calibrated['prd']:6.2f}%  r={calibrated['pearson_r']:+.4f}  "
+              f"EMD={calibrated['emd']:.4f}  KS={calibrated['ks_stat']:.3f}  beat-MAE={calibrated['beat_timing_mae']:.4f}s")
 
         per_subject.append({
             "subject": subj, "n_windows": n, "n_calib": n_calib, "n_eval": n_eval,
@@ -154,14 +168,16 @@ def main():
         vals = [s[key_path[0]][key_path[1]] for s in per_subject]
         return float(np.nanmean(vals))
 
+    agg_keys = ("rmse", "prd", "pearson_r", "emd", "ks_stat", "beat_timing_mae")
     aggregate = {
-        "baseline":   {k: _mean(("baseline", k)) for k in ("rmse", "prd", "pearson_r")},
-        "calibrated": {k: _mean(("calibrated", k)) for k in ("rmse", "prd", "pearson_r")},
+        "baseline":   {k: _mean(("baseline", k)) for k in agg_keys},
+        "calibrated": {k: _mean(("calibrated", k)) for k in agg_keys},
     }
 
     print("\n=== Aggregate (mean over test subjects) ===")
     for split, m in (("baseline  ", aggregate["baseline"]), ("calibrated", aggregate["calibrated"])):
-        print(f"  {split}: RMSE={m['rmse']:.4f}  PRD={m['prd']:6.2f}%  r={m['pearson_r']:+.4f}")
+        print(f"  {split}: RMSE={m['rmse']:.4f}  PRD={m['prd']:6.2f}%  r={m['pearson_r']:+.4f}  "
+              f"EMD={m['emd']:.4f}  KS={m['ks_stat']:.3f}  beat-MAE={m['beat_timing_mae']:.4f}s")
 
     os.makedirs(args.output_dir, exist_ok=True)
     run_name = f"calib_fold{args.fold:02d}_{args.loss_type}_frac{args.calib_frac:g}"
