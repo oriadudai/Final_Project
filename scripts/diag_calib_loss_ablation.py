@@ -1,0 +1,198 @@
+"""Head-to-head comparison of the three loss-ablation models
+(reheartnet_original, reheartnet_huber, reheartnet_clef) on a COMMON test
+window configuration, with AND without per-subject calibration.
+
+Two threads from this session converge here:
+  - [[project_window_size_emd_ks_isolation]]: original/huber's EMD/KS are
+    evaluated on 4s/0%-overlap/bandpassed windows, clef's on 10s/50%-overlap/
+    no-bandpass -- a window-size confound when comparing them directly.
+  - [[project_cross_subject_generalization_failure]]: ~100s of per-subject
+    calibration fine-tuning dramatically improves PRD/r/EMD/KS/beat-MAE for a
+    held-out subject (confirmed for mse_aligned, fold06).
+
+This script removes BOTH confounds at once: for each of the three trained
+checkpoints (results/comparison_reheartnet/{model}/checkpoints/
+reheartnet_fold_{NN}_best.pt, for whichever folds exist), and each of that
+fold's test subjects:
+  1. Build the subject's windows at a COMMON configuration (default: 10s,
+     50% overlap, no bandpass -- clef's protocol), apply_align=False.
+  2. Split chronologically into a calibration slice (first --calib-frac) and
+     an eval slice (the rest).
+  3. BASELINE: evaluate the unmodified checkpoint on the eval slice.
+  4. CALIBRATE: fine-tune a copy of the checkpoint on the calibration slice
+     (Huber loss, --calib-epochs, reusing train_one_epoch). Huber is used for
+     ALL models regardless of original training loss -- a prior mse-vs-huber
+     calibration sweep found near-identical results, and this avoids needing
+     the CLEF encoder for the fine-tuning objective.
+  5. CALIBRATED: re-evaluate on the same eval slice.
+
+Reports, per model, RMSE/PRD/pearson_r/EMD/KS/beat_timing_mae pooled across
+all available subjects/folds, baseline vs calibrated -- a fair comparison of
+the three loss functions under one test protocol, both as population models
+and after personalization.
+
+Usage:
+    python scripts/diag_calib_loss_ablation.py
+    python scripts/diag_calib_loss_ablation.py --folds 0,1 --models reheartnet_clef
+"""
+import argparse
+import json
+import os
+import sys
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Subset
+
+sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import core.config as config
+from core.data_loader import build_test_dataset
+from core.models.baselines import get_model
+from core.train import train_one_epoch
+from compare_reheartnet import MODELS
+from diag_subject_calibration import quick_metrics
+
+AGG_KEYS = ("rmse", "prd", "pearson_r", "emd", "ks_stat", "beat_timing_mae")
+
+
+def _mean(per_subject, split, key):
+    vals = [s[split][key] for s in per_subject]
+    return float(np.nanmean(vals))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--models", type=str, default="reheartnet_original,reheartnet_huber,reheartnet_clef")
+    ap.add_argument("--results-dir", type=str, default=os.path.join("results", "comparison_reheartnet"),
+                    help="Directory containing {model_key}/checkpoints/ and fold_assignments.json.")
+    ap.add_argument("--fold-assignments", type=str, default=None,
+                    help="Defaults to <results-dir>/fold_assignments.json")
+    ap.add_argument("--folds", type=str, default=None,
+                    help="Comma-separated fold indices to run (default: all folds in fold_assignments)")
+    ap.add_argument("--window-sec", type=float, default=None,
+                    help="Common test window size in seconds (default: None -> config 10s)")
+    ap.add_argument("--overlap-frac", type=float, default=0.5)
+    ap.add_argument("--apply-bandpass", action="store_true", default=False)
+    ap.add_argument("--calib-frac", type=float, default=0.2,
+                    help="Fraction of each subject's windows (temporal order) used for calibration.")
+    ap.add_argument("--calib-epochs", type=int, default=20)
+    ap.add_argument("--calib-lr", type=float, default=1e-4)
+    ap.add_argument("--huber-delta", type=float, default=1.71377251715061,
+                    help="Delta for the Huber loss used in calibration fine-tuning (all models).")
+    ap.add_argument("--batch-size", type=int, default=1)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--output-dir", type=str, default=os.path.join("results", "diag_calib_loss_ablation"))
+    args = ap.parse_args()
+
+    device = config.DEVICE
+    print(f"Device: {device}")
+    print(f"Common test windows: window_sec={args.window_sec or config.WINDOW_SIZE}  "
+          f"overlap={args.overlap_frac:.0%}  bandpass={args.apply_bandpass}")
+    print(f"calib_frac={args.calib_frac}  calib_epochs={args.calib_epochs}  "
+          f"calib_lr={args.calib_lr}  fine-tune loss=Huber(delta={args.huber_delta})")
+
+    fold_assignments_path = args.fold_assignments or os.path.join(args.results_dir, "fold_assignments.json")
+    with open(fold_assignments_path) as f:
+        assignments = json.load(f)
+    fold_keys = sorted(assignments.keys())
+    if args.folds:
+        wanted = {int(x) for x in args.folds.split(",")}
+        fold_keys = [k for k in fold_keys if int(k.split("_")[1]) in wanted]
+    print(f"Folds: {fold_keys}")
+
+    model_keys = [k.strip() for k in args.models.split(",")]
+    criterion = nn.HuberLoss(delta=args.huber_delta)
+
+    results = {}
+    for model_key in model_keys:
+        if model_key not in MODELS:
+            print(f"\nSkipping unknown model key: {model_key} (not in compare_reheartnet.MODELS)")
+            continue
+        model_cfg = MODELS[model_key]
+        print(f"\n{'-'*60}\n  Model: {model_cfg['label']}\n{'-'*60}")
+
+        per_subject = []
+        for fold_key in fold_keys:
+            fold_idx = int(fold_key.split("_")[1])
+            test_subs = assignments[fold_key]["test"]
+
+            ckpt_path = os.path.join(args.results_dir, model_key, "checkpoints",
+                                      f"reheartnet_fold_{fold_idx:02d}_best.pt")
+            if not os.path.exists(ckpt_path):
+                print(f"  fold {fold_idx:02d}: checkpoint not found ({ckpt_path}), skipping.")
+                continue
+
+            ckpt = torch.load(ckpt_path, map_location=device)
+            hidden_size = ckpt.get("hidden_size", model_cfg.get("hidden_size", config.HIDDEN_SIZE))
+
+            for subj in test_subs:
+                ds = build_test_dataset([subj], window_sec=args.window_sec,
+                                         overlap_frac=args.overlap_frac,
+                                         apply_bandpass=args.apply_bandpass)
+                n = len(ds)
+                n_calib = max(1, min(n - 1, int(round(n * args.calib_frac))))
+
+                calib_ds = Subset(ds, range(0, n_calib))
+                eval_ds = Subset(ds, range(n_calib, n))
+                calib_loader = DataLoader(calib_ds, batch_size=args.batch_size, shuffle=True,
+                                           num_workers=0, pin_memory=True)
+                eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False,
+                                          num_workers=0, pin_memory=True)
+
+                torch.manual_seed(args.seed)
+                model = get_model("reheartnet", hidden_size=hidden_size).to(device)
+                model.load_state_dict(ckpt["model_state_dict"])
+
+                baseline = quick_metrics(model, eval_loader, device)
+
+                optimizer = optim.Adam(model.parameters(), lr=args.calib_lr)
+                for _ in range(args.calib_epochs):
+                    train_one_epoch(model, calib_loader, criterion, optimizer, device)
+
+                calibrated = quick_metrics(model, eval_loader, device)
+
+                print(f"    {subj} (fold{fold_idx:02d}, n={n}): "
+                      f"PRD {baseline['prd']:6.2f}%->{calibrated['prd']:6.2f}%  "
+                      f"r {baseline['pearson_r']:+.3f}->{calibrated['pearson_r']:+.3f}  "
+                      f"EMD {baseline['emd']:.3f}->{calibrated['emd']:.3f}  "
+                      f"KS {baseline['ks_stat']:.3f}->{calibrated['ks_stat']:.3f}")
+
+                per_subject.append({
+                    "fold": fold_idx, "subject": subj, "n_windows": n,
+                    "n_calib": n_calib, "n_eval": n - n_calib,
+                    "baseline": baseline, "calibrated": calibrated,
+                })
+
+        if not per_subject:
+            print(f"  No checkpoints found for {model_key}, skipping.")
+            continue
+
+        aggregate = {
+            "baseline":   {k: _mean(per_subject, "baseline", k) for k in AGG_KEYS},
+            "calibrated": {k: _mean(per_subject, "calibrated", k) for k in AGG_KEYS},
+        }
+
+        n_folds_used = len(set(s["fold"] for s in per_subject))
+        print(f"\n  === {model_key}: {len(per_subject)} subjects across {n_folds_used} fold(s) ===")
+        for split, m in (("baseline  ", aggregate["baseline"]), ("calibrated", aggregate["calibrated"])):
+            print(f"    {split}: RMSE={m['rmse']:.4f}  PRD={m['prd']:6.2f}%  r={m['pearson_r']:+.4f}  "
+                  f"EMD={m['emd']:.4f}  KS={m['ks_stat']:.3f}  beat-MAE={m['beat_timing_mae']:.4f}s")
+
+        results[model_key] = {
+            "label": model_cfg["label"], "n_subjects": len(per_subject), "n_folds": n_folds_used,
+            "per_subject": per_subject, "aggregate": aggregate,
+        }
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    out_path = os.path.join(args.output_dir, "calib_loss_ablation_summary.json")
+    with open(out_path, "w") as f:
+        json.dump(results, f, indent=2, default=str)
+    print(f"\nSaved results to {out_path}")
+
+
+if __name__ == "__main__":
+    main()
