@@ -64,7 +64,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -75,7 +75,7 @@ from core.models.baselines import get_model
 from core.train import train_one_epoch
 from core.losses.composite_loss import ClinicalCompositeLoss, load_clef_encoder
 from compare_reheartnet import MODELS
-from diag_subject_calibration import quick_metrics
+from diag_subject_calibration import quick_metrics, chronological_calib_eval_split
 
 AGG_KEYS = ("rmse", "prd", "pearson_r", "emd", "ks_stat", "beat_timing_mae")
 
@@ -261,10 +261,8 @@ def main():
                                          overlap_frac=args.overlap_frac,
                                          apply_bandpass=args.apply_bandpass)
                 n = len(ds)
-                n_calib = max(1, min(n - 1, int(round(n * args.calib_frac))))
-
-                calib_ds = Subset(ds, range(0, n_calib))
-                eval_ds = Subset(ds, range(n_calib, n))
+                calib_ds, eval_ds, n_calib, n_eval = chronological_calib_eval_split(
+                    ds, args.calib_frac, args.overlap_frac)
                 calib_loader = DataLoader(calib_ds, batch_size=args.batch_size, shuffle=True,
                                            num_workers=0, pin_memory=True)
                 eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False,
@@ -292,7 +290,7 @@ def main():
 
                 per_subject.append({
                     "fold": fold_idx, "subject": subj, "n_windows": n,
-                    "n_calib": n_calib, "n_eval": n - n_calib,
+                    "n_calib": n_calib, "n_eval": n_eval,
                     "baseline": baseline, "calibrated": calibrated,
                 })
 

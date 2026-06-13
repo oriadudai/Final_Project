@@ -56,6 +56,29 @@ from core.models.baselines import get_model
 from core.train import train_one_epoch
 
 
+def chronological_calib_eval_split(ds, calib_frac, overlap_frac):
+    """Split a subject's windows chronologically into a calibration slice and
+    a held-out eval slice, then drop the leading eval windows that share raw
+    samples with the last calibration window.
+
+    With overlap_frac > 0, consecutive windows overlap by overlap_frac of
+    their length, so the eval windows immediately after the calib/eval
+    boundary would otherwise contain signal the model was just fine-tuned on.
+
+    Returns (calib_ds, eval_ds, n_calib, n_eval).
+    """
+    n = len(ds)
+    n_calib = max(1, min(n - 1, int(round(n * calib_frac))))
+    if overlap_frac > 0:
+        gap = max(0, int(np.ceil(1.0 / (1.0 - overlap_frac) - 1e-9)) - 1)
+    else:
+        gap = 0
+    eval_start = min(n_calib + gap, n - 1)
+    calib_ds = Subset(ds, range(0, n_calib))
+    eval_ds = Subset(ds, range(eval_start, n))
+    return calib_ds, eval_ds, n_calib, len(eval_ds)
+
+
 def quick_metrics(model, loader, device):
     model.eval()
     t_all, p_all = [], []
@@ -131,11 +154,8 @@ def main():
     for subj in test_subs:
         ds = build_test_dataset([subj], window_sec=args.window_sec, overlap_frac=args.overlap_frac)
         n = len(ds)
-        n_calib = max(1, min(n - 1, int(round(n * args.calib_frac))))
-        n_eval = n - n_calib
-
-        calib_ds = Subset(ds, range(0, n_calib))
-        eval_ds = Subset(ds, range(n_calib, n))
+        calib_ds, eval_ds, n_calib, n_eval = chronological_calib_eval_split(
+            ds, args.calib_frac, args.overlap_frac)
         calib_loader = DataLoader(calib_ds, batch_size=args.batch_size, shuffle=True,
                                    num_workers=0, pin_memory=True)
         eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False,
