@@ -72,6 +72,110 @@ def plot_reconstruction_samples(
     plt.close(fig)
 
 
+def plot_calibration_comparison(
+    true_ecg: np.ndarray,
+    baseline_pred: np.ndarray,
+    calibrated_pred: np.ndarray,
+    fs: int = 125,
+    n_samples: int = 3,
+    save_path: Optional[str] = None,
+    subject_id: Optional[str] = None,
+    window_indices: Optional[List[int]] = None,
+) -> None:
+    """Overlay real ECG vs baseline (population) vs calibrated (per-subject) reconstructions.
+
+    Args:
+        true_ecg:        (N, seq_len) ground-truth eval-slice windows.
+        baseline_pred:   (N, seq_len) reconstructions before per-subject calibration.
+        calibrated_pred: (N, seq_len) reconstructions after per-subject calibration.
+        fs:              Sampling frequency.
+        n_samples:       Number of windows to show (ignored if window_indices given);
+                          chosen evenly spaced across the eval slice.
+        save_path:       Full path for the saved PNG. Auto-generated if None.
+        subject_id:       Optional subject label for the figure title/filename.
+        window_indices:  Explicit eval-slice window indices to plot.
+    """
+    if save_path is None:
+        tag = subject_id or "preview"
+        save_path = os.path.join(_FIG_DIR, f"calibration_comparison_{tag}.png")
+    _ensure_fig_dir(save_path)
+
+    if window_indices is None:
+        n = min(n_samples, len(true_ecg))
+        window_indices = np.linspace(0, len(true_ecg) - 1, n).astype(int)
+    t = np.arange(true_ecg.shape[1]) / fs
+
+    fig, axes = plt.subplots(len(window_indices), 1, figsize=(12, 3 * len(window_indices)), squeeze=False)
+    for row, idx in enumerate(window_indices):
+        ax = axes[row, 0]
+        ax.plot(t, true_ecg[idx], color="#1f77b4", linewidth=1.2, label="Real ECG", alpha=0.9)
+        ax.plot(t, baseline_pred[idx], color="#ff7f0e", linewidth=1.0, label="Baseline (population)", alpha=0.85)
+        ax.plot(t, calibrated_pred[idx], color="#2ca02c", linewidth=1.0, label="Calibrated (per-subject)", alpha=0.85)
+        title = f"Eval window {idx}"
+        if subject_id:
+            title += f"  [{subject_id}]"
+        ax.set_title(title, fontsize=9)
+        ax.set_xlabel("Time (s)", fontsize=8)
+        ax.set_ylabel("Amplitude (z)", fontsize=8)
+        ax.legend(fontsize=8, loc="upper right")
+        ax.grid(True, alpha=0.3)
+
+    fig.suptitle("ECG Reconstruction: Real vs Baseline vs Calibrated", fontsize=11, y=1.01)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_calibration_comparison_multi_subject(
+    subjects: List[Dict],
+    fs: int = 125,
+    save_path: Optional[str] = None,
+) -> None:
+    """One panel per subject: real ECG vs baseline vs calibrated for a single window.
+
+    Args:
+        subjects: list of dicts, one per subject, each with keys:
+            "subject_id":        label for the panel title.
+            "true_ecg":          (seq_len,) ground-truth window.
+            "baseline_pred":     (seq_len,) reconstruction before calibration.
+            "calibrated_pred":   (seq_len,) reconstruction after calibration.
+            "baseline_metrics" / "calibrated_metrics": optional dicts with
+                "prd" and "pearson_r" keys, shown in the panel title.
+        fs:        Sampling frequency.
+        save_path: Full path for the saved PNG. Defaults to
+                   results/figures/calibration_comparison_multi.png.
+    """
+    if save_path is None:
+        save_path = os.path.join(_FIG_DIR, "calibration_comparison_multi.png")
+    _ensure_fig_dir(save_path)
+
+    n = len(subjects)
+    t = np.arange(subjects[0]["true_ecg"].shape[0]) / fs
+
+    fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), squeeze=False)
+    for col, s in enumerate(subjects):
+        ax = axes[0, col]
+        ax.plot(t, s["true_ecg"], color="#1f77b4", linewidth=1.2, label="Real ECG", alpha=0.9)
+        ax.plot(t, s["baseline_pred"], color="#ff7f0e", linewidth=1.0, label="Baseline (population)", alpha=0.85)
+        ax.plot(t, s["calibrated_pred"], color="#2ca02c", linewidth=1.0, label="Calibrated (per-subject)", alpha=0.85)
+        title = s.get("subject_id", f"Subject {col}")
+        bm, cm = s.get("baseline_metrics"), s.get("calibrated_metrics")
+        if bm and cm:
+            title += (f"\nPRD {bm['prd']:.1f}%→{cm['prd']:.1f}%, "
+                      f"r {bm['pearson_r']:+.2f}→{cm['pearson_r']:+.2f}")
+        ax.set_title(title, fontsize=9)
+        ax.set_xlabel("Time (s)", fontsize=8)
+        if col == 0:
+            ax.set_ylabel("Amplitude (z)", fontsize=8)
+        ax.legend(fontsize=7, loc="upper right")
+        ax.grid(True, alpha=0.3)
+
+    fig.suptitle("ECG Reconstruction: Real vs Baseline vs Calibrated", fontsize=11, y=1.02)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_rr_distributions(
     true_rr: np.ndarray,
     pred_rr: np.ndarray,
