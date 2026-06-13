@@ -130,8 +130,9 @@ def plot_calibration_comparison_multi_subject(
     subjects: List[Dict],
     fs: int = 125,
     save_path: Optional[str] = None,
+    crop_sec: Optional[float] = 4.0,
 ) -> None:
-    """One panel per subject: real ECG vs baseline vs calibrated for a single window.
+    """One panel per subject (stacked vertically): real ECG vs baseline vs calibrated.
 
     Args:
         subjects: list of dicts, one per subject, each with keys:
@@ -144,33 +145,37 @@ def plot_calibration_comparison_multi_subject(
         fs:        Sampling frequency.
         save_path: Full path for the saved PNG. Defaults to
                    results/figures/calibration_comparison_multi.png.
+        crop_sec:  If set, only show the first crop_sec seconds of each window
+                   (the full window is often too long to read individual
+                   beats). None shows the full window.
     """
     if save_path is None:
         save_path = os.path.join(_FIG_DIR, "calibration_comparison_multi.png")
     _ensure_fig_dir(save_path)
 
     n = len(subjects)
-    t = np.arange(subjects[0]["true_ecg"].shape[0]) / fs
+    seq_len = subjects[0]["true_ecg"].shape[0]
+    n_crop = min(seq_len, int(round(crop_sec * fs))) if crop_sec else seq_len
+    t = np.arange(n_crop) / fs
 
-    fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), squeeze=False)
-    for col, s in enumerate(subjects):
-        ax = axes[0, col]
-        ax.plot(t, s["true_ecg"], color="#1f77b4", linewidth=1.2, label="Real ECG", alpha=0.9)
-        ax.plot(t, s["baseline_pred"], color="#ff7f0e", linewidth=1.0, label="Baseline (population)", alpha=0.85)
-        ax.plot(t, s["calibrated_pred"], color="#2ca02c", linewidth=1.0, label="Calibrated (per-subject)", alpha=0.85)
-        title = s.get("subject_id", f"Subject {col}")
+    fig, axes = plt.subplots(n, 1, figsize=(10, 3 * n), squeeze=False)
+    for row, s in enumerate(subjects):
+        ax = axes[row, 0]
+        ax.plot(t, s["true_ecg"][:n_crop], color="#1f77b4", linewidth=1.4, label="Real ECG", alpha=0.9)
+        ax.plot(t, s["baseline_pred"][:n_crop], color="#ff7f0e", linewidth=1.2, label="Baseline (population)", alpha=0.85)
+        ax.plot(t, s["calibrated_pred"][:n_crop], color="#2ca02c", linewidth=1.2, label="Calibrated (per-subject)", alpha=0.85)
+        title = s.get("subject_id", f"Subject {row}")
         bm, cm = s.get("baseline_metrics"), s.get("calibrated_metrics")
         if bm and cm:
-            title += (f"\nPRD {bm['prd']:.1f}%→{cm['prd']:.1f}%, "
+            title += (f"   PRD {bm['prd']:.1f}%→{cm['prd']:.1f}%, "
                       f"r {bm['pearson_r']:+.2f}→{cm['pearson_r']:+.2f}")
-        ax.set_title(title, fontsize=9)
+        ax.set_title(title, fontsize=10)
         ax.set_xlabel("Time (s)", fontsize=8)
-        if col == 0:
-            ax.set_ylabel("Amplitude (z)", fontsize=8)
-        ax.legend(fontsize=7, loc="upper right")
+        ax.set_ylabel("Amplitude (z)", fontsize=8)
+        ax.legend(fontsize=8, loc="upper right")
         ax.grid(True, alpha=0.3)
 
-    fig.suptitle("ECG Reconstruction: Real vs Baseline vs Calibrated", fontsize=11, y=1.02)
+    fig.suptitle("ECG Reconstruction: Real vs Baseline vs Calibrated", fontsize=11, y=1.01)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
