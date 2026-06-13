@@ -574,8 +574,8 @@ effect on the main CV pipeline.
   on a checkpoint that was never trained with it. Forcing `--calib-loss composite` onto
   `reheartnet_original` re-trained at Optuna's lr (3.15e-4, a `loss_type="mse"` checkpoint whose
   `auto` default is Huber-only) found a **clean win-win on all 5 metrics at full scale** (53
-  subjects, 8 folds): RMSE -19.7%, PRD 104.64%→84.11%, r +0.017→+0.463, EMD -49.2%, KS -51.5%,
-  beat-MAE -22.4%. Unlike `arch_reheartnet` (CLEF-trained, already near the EMD/KS frontier —
+  subjects, 8 folds): RMSE -19.7%, PRD 104.65%→84.10%, r +0.017→+0.463, EMD -48.9%, KS -51.1%,
+  beat-MAE -22.8%. Unlike `arch_reheartnet` (CLEF-trained, already near the EMD/KS frontier —
   partial tradeoff per Section 4.7), this checkpoint starts ~3-4x farther from the frontier,
   leaving room for distortion and perceptual-quality metrics to improve together. See
   Section 4.7 of the Final Report.

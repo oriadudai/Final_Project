@@ -31,16 +31,18 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import core.config as config
 from core.data_loader import build_test_dataset
+from core.metrics.clinical_metrics import compute_beat_timing_mae, compute_emd, compute_ks
 from core.models.baselines import get_model
 from core.train import train_one_epoch
 from core.losses.composite_loss import ClinicalCompositeLoss, load_clef_encoder
 from core.visualization.plots import plot_calibration_comparison_multi_subject
+from diag_subject_calibration import chronological_calib_eval_split
 
 
 def predict_all(model, loader, device):
@@ -54,13 +56,17 @@ def predict_all(model, loader, device):
     return np.concatenate(t_all, axis=0), np.concatenate(p_all, axis=0)
 
 
-def quick_metrics_from_arrays(t_stack, p_stack):
+def quick_metrics_from_arrays(t_stack, p_stack, fs):
     t, p = t_stack.ravel(), p_stack.ravel()
     rmse = float(np.sqrt(np.mean((t - p) ** 2)))
     denom = float((t ** 2).sum())
     prd = float(np.sqrt(((t - p) ** 2).sum() / denom) * 100) if denom > 1e-12 else float("nan")
     r = float(np.corrcoef(t, p)[0, 1]) if t.std() > 1e-8 and p.std() > 1e-8 else float("nan")
-    return {"rmse": rmse, "prd": prd, "pearson_r": r}
+    emd = compute_emd(t_stack, p_stack, fs=fs)
+    ks_stat, _ = compute_ks(t_stack, p_stack, fs=fs)
+    beat_mae = compute_beat_timing_mae(t_stack, p_stack, fs=fs)
+    return {"rmse": rmse, "prd": prd, "pearson_r": r,
+            "emd": emd, "ks_stat": ks_stat, "beat_timing_mae": beat_mae}
 
 
 def run_subject(args, subject, fold, criterion, device):
@@ -80,12 +86,10 @@ def run_subject(args, subject, fold, criterion, device):
                              overlap_frac=args.overlap_frac,
                              apply_bandpass=args.apply_bandpass)
     n = len(ds)
-    n_calib = max(1, min(n - 1, int(round(n * args.calib_frac))))
-    n_eval = n - n_calib
+    calib_ds, eval_ds, n_calib, n_eval = chronological_calib_eval_split(
+        ds, args.calib_frac, args.overlap_frac)
     print(f"{subject} (fold{fold:02d}): n_windows={n}  n_calib={n_calib}  n_eval={n_eval}")
 
-    calib_ds = Subset(ds, range(0, n_calib))
-    eval_ds = Subset(ds, range(n_calib, n))
     calib_loader = DataLoader(calib_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True)
     eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
@@ -94,16 +98,18 @@ def run_subject(args, subject, fold, criterion, device):
     model.load_state_dict(ckpt["model_state_dict"])
 
     true_eval, baseline_pred = predict_all(model, eval_loader, device)
-    baseline = quick_metrics_from_arrays(true_eval, baseline_pred)
-    print(f"  baseline  : RMSE={baseline['rmse']:.4f}  PRD={baseline['prd']:6.2f}%  r={baseline['pearson_r']:+.4f}")
+    baseline = quick_metrics_from_arrays(true_eval, baseline_pred, config.FS)
+    print(f"  baseline  : RMSE={baseline['rmse']:.4f}  PRD={baseline['prd']:6.2f}%  r={baseline['pearson_r']:+.4f}  "
+          f"EMD={baseline['emd']:.4f}  KS={baseline['ks_stat']:.3f}  beat-MAE={baseline['beat_timing_mae']:.4f}s")
 
     optimizer = optim.Adam(model.parameters(), lr=args.calib_lr)
     for _ in range(args.calib_epochs):
         train_one_epoch(model, calib_loader, criterion, optimizer, device)
 
     _, calibrated_pred = predict_all(model, eval_loader, device)
-    calibrated = quick_metrics_from_arrays(true_eval, calibrated_pred)
-    print(f"  calibrated: RMSE={calibrated['rmse']:.4f}  PRD={calibrated['prd']:6.2f}%  r={calibrated['pearson_r']:+.4f}")
+    calibrated = quick_metrics_from_arrays(true_eval, calibrated_pred, config.FS)
+    print(f"  calibrated: RMSE={calibrated['rmse']:.4f}  PRD={calibrated['prd']:6.2f}%  r={calibrated['pearson_r']:+.4f}  "
+          f"EMD={calibrated['emd']:.4f}  KS={calibrated['ks_stat']:.3f}  beat-MAE={calibrated['beat_timing_mae']:.4f}s")
 
     window_idx = n_eval // 2
     return {

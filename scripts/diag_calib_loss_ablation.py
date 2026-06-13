@@ -60,7 +60,6 @@ import json
 import os
 import sys
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -75,7 +74,7 @@ from core.models.baselines import get_model
 from core.train import train_one_epoch
 from core.losses.composite_loss import ClinicalCompositeLoss, load_clef_encoder
 from compare_reheartnet import MODELS
-from diag_subject_calibration import quick_metrics, chronological_calib_eval_split
+from diag_subject_calibration import quick_metrics, chronological_calib_eval_split, aggregate_with_ci
 
 AGG_KEYS = ("rmse", "prd", "pearson_r", "emd", "ks_stat", "beat_timing_mae")
 
@@ -91,11 +90,6 @@ EXTRA_MODELS = {
         "hidden_size": config.HIDDEN_SIZE,
     },
 }
-
-
-def _mean(per_subject, split, key):
-    vals = [s[split][key] for s in per_subject]
-    return float(np.nanmean(vals))
 
 
 def main():
@@ -298,16 +292,17 @@ def main():
             print(f"  No checkpoints found for {model_key}, skipping.")
             continue
 
-        aggregate = {
-            "baseline":   {k: _mean(per_subject, "baseline", k) for k in AGG_KEYS},
-            "calibrated": {k: _mean(per_subject, "calibrated", k) for k in AGG_KEYS},
-        }
+        aggregate = aggregate_with_ci(per_subject, AGG_KEYS)
 
         n_folds_used = len(set(s["fold"] for s in per_subject))
         print(f"\n  === {model_key}: {len(per_subject)} subjects across {n_folds_used} fold(s) ===")
         for split, m in (("baseline  ", aggregate["baseline"]), ("calibrated", aggregate["calibrated"])):
-            print(f"    {split}: RMSE={m['rmse']:.4f}  PRD={m['prd']:6.2f}%  r={m['pearson_r']:+.4f}  "
-                  f"EMD={m['emd']:.4f}  KS={m['ks_stat']:.3f}  beat-MAE={m['beat_timing_mae']:.4f}s")
+            print(f"    {split}: RMSE={m['rmse']['mean']:.4f}+/-{m['rmse']['ci95_margin']:.4f}  "
+                  f"PRD={m['prd']['mean']:6.2f}+/-{m['prd']['ci95_margin']:.2f}%  "
+                  f"r={m['pearson_r']['mean']:+.4f}+/-{m['pearson_r']['ci95_margin']:.4f}  "
+                  f"EMD={m['emd']['mean']:.4f}+/-{m['emd']['ci95_margin']:.4f}  "
+                  f"KS={m['ks_stat']['mean']:.3f}+/-{m['ks_stat']['ci95_margin']:.3f}  "
+                  f"beat-MAE={m['beat_timing_mae']['mean']:.4f}+/-{m['beat_timing_mae']['ci95_margin']:.4f}s")
 
         results[model_key] = {
             "label": label, "n_subjects": len(per_subject), "n_folds": n_folds_used,

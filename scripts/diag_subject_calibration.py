@@ -102,6 +102,35 @@ def quick_metrics(model, loader, device):
             "emd": emd, "ks_stat": ks_stat, "beat_timing_mae": beat_mae}
 
 
+def _mean_ci(values):
+    arr = np.array([v for v in values if not np.isnan(v)])
+    if len(arr) == 0:
+        return float("nan"), 0.0
+    mean = float(np.mean(arr))
+    margin = 1.96 * float(np.std(arr, ddof=1)) / np.sqrt(len(arr)) if len(arr) > 1 else 0.0
+    return mean, margin
+
+
+def aggregate_with_ci(per_subject, agg_keys):
+    """Aggregate per-subject baseline/calibrated metrics as mean +/- 95% CI.
+
+    Returns {"baseline": {key: {"mean", "ci95_margin", "n"}}, "calibrated": {...}}
+    so callers can report e.g. "0.838 +/- 0.030" without re-running the
+    (expensive) per-subject calibration loop that produced per_subject.
+    """
+    aggregate = {}
+    for split in ("baseline", "calibrated"):
+        aggregate[split] = {}
+        for key in agg_keys:
+            vals = [s[split][key] for s in per_subject]
+            mean, margin = _mean_ci(vals)
+            aggregate[split][key] = {
+                "mean": mean, "ci95_margin": margin,
+                "n": sum(1 for v in vals if not np.isnan(v)),
+            }
+    return aggregate
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fold", type=int, default=6)
@@ -184,20 +213,17 @@ def main():
             "baseline": baseline, "calibrated": calibrated,
         })
 
-    def _mean(key_path):
-        vals = [s[key_path[0]][key_path[1]] for s in per_subject]
-        return float(np.nanmean(vals))
-
     agg_keys = ("rmse", "prd", "pearson_r", "emd", "ks_stat", "beat_timing_mae")
-    aggregate = {
-        "baseline":   {k: _mean(("baseline", k)) for k in agg_keys},
-        "calibrated": {k: _mean(("calibrated", k)) for k in agg_keys},
-    }
+    aggregate = aggregate_with_ci(per_subject, agg_keys)
 
-    print("\n=== Aggregate (mean over test subjects) ===")
+    print(f"\n=== Aggregate (mean +/- 95% CI over {len(per_subject)} test subjects) ===")
     for split, m in (("baseline  ", aggregate["baseline"]), ("calibrated", aggregate["calibrated"])):
-        print(f"  {split}: RMSE={m['rmse']:.4f}  PRD={m['prd']:6.2f}%  r={m['pearson_r']:+.4f}  "
-              f"EMD={m['emd']:.4f}  KS={m['ks_stat']:.3f}  beat-MAE={m['beat_timing_mae']:.4f}s")
+        print(f"  {split}: RMSE={m['rmse']['mean']:.4f}+/-{m['rmse']['ci95_margin']:.4f}  "
+              f"PRD={m['prd']['mean']:6.2f}+/-{m['prd']['ci95_margin']:.2f}%  "
+              f"r={m['pearson_r']['mean']:+.4f}+/-{m['pearson_r']['ci95_margin']:.4f}  "
+              f"EMD={m['emd']['mean']:.4f}+/-{m['emd']['ci95_margin']:.4f}  "
+              f"KS={m['ks_stat']['mean']:.3f}+/-{m['ks_stat']['ci95_margin']:.3f}  "
+              f"beat-MAE={m['beat_timing_mae']['mean']:.4f}+/-{m['beat_timing_mae']['ci95_margin']:.4f}s")
 
     os.makedirs(args.output_dir, exist_ok=True)
     run_name = f"calib_fold{args.fold:02d}_{args.loss_type}_frac{args.calib_frac:g}"

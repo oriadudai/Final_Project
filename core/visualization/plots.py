@@ -158,7 +158,7 @@ def plot_calibration_comparison_multi_subject(
     n_crop = min(seq_len, int(round(crop_sec * fs))) if crop_sec else seq_len
     t = np.arange(n_crop) / fs
 
-    fig, axes = plt.subplots(n, 1, figsize=(10, 3 * n), squeeze=False)
+    fig, axes = plt.subplots(n, 1, figsize=(10, 3.6 * n), squeeze=False)
     for row, s in enumerate(subjects):
         ax = axes[row, 0]
         ax.plot(t, s["true_ecg"][:n_crop], color="#1f77b4", linewidth=1.4, label="Real ECG", alpha=0.9)
@@ -167,9 +167,17 @@ def plot_calibration_comparison_multi_subject(
         title = s.get("subject_id", f"Subject {row}")
         bm, cm = s.get("baseline_metrics"), s.get("calibrated_metrics")
         if bm and cm:
-            title += (f"   PRD {bm['prd']:.1f}%→{cm['prd']:.1f}%, "
-                      f"r {bm['pearson_r']:+.2f}→{cm['pearson_r']:+.2f}")
-        ax.set_title(title, fontsize=10)
+            if "emd" in bm and "emd" in cm:
+                title += (
+                    f"\nBaseline:   RMSE={bm['rmse']:.3f}  PRD={bm['prd']:5.1f}%  r={bm['pearson_r']:+.2f}  "
+                    f"EMD={bm['emd']:.3f}  KS={bm['ks_stat']:.3f}  beat-MAE={bm['beat_timing_mae']:.3f}s\n"
+                    f"Calibrated: RMSE={cm['rmse']:.3f}  PRD={cm['prd']:5.1f}%  r={cm['pearson_r']:+.2f}  "
+                    f"EMD={cm['emd']:.3f}  KS={cm['ks_stat']:.3f}  beat-MAE={cm['beat_timing_mae']:.3f}s"
+                )
+            else:
+                title += (f"   PRD {bm['prd']:.1f}%→{cm['prd']:.1f}%, "
+                          f"r {bm['pearson_r']:+.2f}→{cm['pearson_r']:+.2f}")
+        ax.set_title(title, fontsize=9, family="monospace", loc="left")
         ax.set_xlabel("Time (s)", fontsize=8)
         ax.set_ylabel("Amplitude (z)", fontsize=8)
         ax.legend(fontsize=8, loc="upper right")
