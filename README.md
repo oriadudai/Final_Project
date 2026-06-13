@@ -7,7 +7,7 @@ Built on **Lee et al. (2026)**, extended with:
 - **CLEF perceptual loss** — frozen ECG foundation model (Nokia Bell Labs) enforces clinical feature consistency during training
 - **8-fold group cross-validation** — subject-disjoint, ~7 test subjects per fold
 - **Optuna hyperparameter search** — tunes λ, δ, hidden size
-- **Clinical evaluation metrics** — PRD, BCE (via CLEF features), EMD, KS test on RR intervals
+- **Clinical evaluation metrics** — PRD, EMD, KS test on RR intervals
 
 ---
 
@@ -206,7 +206,7 @@ protocol as Lee et al. — only the loss function changes:
 > loss-specific hyperparameters `huber_delta`
 > and `lambda_clinical` from the Optuna study.
 > `H=32` is pinned uniformly across all three variants so the loss function remains the only variable.
-> `reheartnet_clef` uses 10 s windows because the CLEF encoder requires 10 s input (see BCE note below).
+> `reheartnet_clef` uses 10 s windows because the CLEF encoder requires 10 s input.
 > `--no-phase-align` (not in Lee et al.): diagnostic/ablation flag that disables the
 > train-only PPG→ECG phase alignment (see Cross-Validation Design below), making
 > train and test preprocessing consistent. Off by default — the default run preserves
@@ -277,13 +277,21 @@ results/comparison_reheartnet/
 
 ---
 
-### Step 4 — Architecture Ablation *(optional)*
+### Step 4 — Architecture Ablation *(optional, descoped)*
 
 ```bash
 python run_cv.py --clef-path models/clef/clef_small.ckpt --all-models --no-wandb
 ```
 
 Runs: `linear` → `lstm` → `bilstm` → `reheartnet` (same Huber+CLEF loss for all).
+
+> **Status:** this 8-fold, 4-way run (`results/comparison_arch`) was launched but descoped
+> before completion. `lstm` and `bilstm` were stopped partway through cross-validation
+> (fold 2-3 of 8) once the fold-0 results showed the val/test generalization gap (see
+> Diagnostic Experiments below) is architecture-independent. `reheartnet`
+> (`arch_reheartnet`) was kept training to completion and is instead analysed as part of
+> the per-subject calibration study (`diag_calib_loss_ablation.py`, Final Report
+> Section 4.7) rather than anchoring a 4-way architecture comparison.
 
 ---
 
@@ -435,7 +443,6 @@ All metrics computed on held-out test subjects per fold. Reported as **mean ± 9
 | **RMSE** | Root Mean Square Error (z-scored units) | ↓ lower | `compute_rmse()` |
 | **PRD** | % Root Mean Square Difference (normalised) | ↓ lower | `compute_prd()` |
 | **Pearson r** | Waveform correlation | ↑ higher | `compute_pearson_r()` |
-| **BCE** | Consistency in CLEF clinical feature space | ↓ lower | `CLEFClassifier` + `compute_bce()` |
 | **EMD** | Wasserstein-1 on RR interval distributions | ↓ lower | `compute_emd()` |
 | **KS stat** | KS test D-statistic on RR interval CDFs | ↓ lower | `compute_ks()` |
 | **Beat MAE** | Mean absolute R-peak timing error (s) | ↓ lower | `compute_beat_timing_mae()` |
@@ -443,29 +450,19 @@ All metrics computed on held-out test subjects per fold. Reported as **mean ± 9
 > **RMSE note:** computed on z-scored signals (normalised units, not mV). For comparison with Lee et al. Table I (mV), see the literature table in the report which accounts for the unit difference.
 > **Pearson r** is the only metric where **higher is better**.
 
-**BCE note:** Uses `CLEFClassifier` — the frozen CLEF encoder maps each ECG window to 256-dim
-clinical feature scores (sigmoid-activated). BCE between real and reconstructed scores measures
-diagnostic consistency in CLEF's clinically-supervised feature space. No PTB-XL data needed.
-
-`CLEFClassifier` requires **10 s input** (it resamples to 5000 samples at 500 Hz internally).
-For 4 s models (original/Huber), BCE is evaluated on a **separate 10 s test DataLoader**
-built from the same held-out subjects — the BiLSTM is sequence-length agnostic so the trained
-model runs on 10 s PPG windows at eval time. PRD, Pearson r, EMD, KS, and Beat MAE are still
-evaluated on 4 s windows consistent with training.
-
 R-peaks detected with `neurokit2.ecg_peaks()` (Pan-Tompkins). Windows with <3 peaks skipped.
 
 ---
 
 ## Diagnostic-Consistency Evaluation (additive, post-hoc)
 
-A further metric — **diagnostic consistency** (`diag_kl`, `diag_flip_rate`) — complements BCE
-with a label-grounded question: *would a classifier trained on real diagnoses reach the same
-conclusion on the reconstruction as on the real ECG?* Where BCE checks consistency in CLEF's
-label-free pretrained feature space, this metric checks agreement against an actual PTB-XL-trained
-pathology classifier — the same spirit as the downstream validation in Guan et al. (2026)
-*WearECG*, adapted for the label-free BIDMC setting (consistency rather than absolute accuracy,
-since BIDMC has no diagnostic labels to validate the reconstruction against directly).
+A further metric — **diagnostic consistency** (`diag_kl`, `diag_flip_rate`) — answers a
+label-grounded question: *would a classifier trained on real diagnoses reach the same
+conclusion on the reconstruction as on the real ECG?* It checks agreement against an actual
+PTB-XL-trained pathology classifier — the same spirit as the downstream validation in
+Guan et al. (2026) *WearECG*, adapted for the label-free BIDMC setting (consistency rather
+than absolute accuracy, since BIDMC has no diagnostic labels to validate the reconstruction
+against directly).
 
 It is implemented as **three standalone scripts that touch none of the training/eval pipeline**
 (`run_cv.py` / `compare_reheartnet.py` / `core/evaluate.py`) — they only read already-saved
@@ -490,8 +487,7 @@ python scripts/evaluate_diagnostic_consistency.py \
 `fold_subjects` saved inside its checkpoint, runs the trained reconstruction model plus the
 frozen PTB-XL classifier, and reports `diag_kl` (mean KL divergence between real/reconstructed
 diagnostic-probability vectors) and `diag_flip_rate` (top-1 diagnosis disagreement rate),
-aggregated as mean ± 95% CI per model variant — additive to, never a replacement for, the
-existing CLEF-based BCE.
+aggregated as mean ± 95% CI per model variant.
 
 ---
 
@@ -503,6 +499,27 @@ existing CLEF-based BCE.
 - Fresh `ReHeartNet` per fold — no leakage between folds
 - Phase alignment (PPG→ECG cross-correlation) applied to **training windows only**
 - Fold assignments saved to `results/fold_assignments.json` (reproducible)
+
+---
+
+## Per-Subject Calibration Protocol (our addition, not in Lee et al.)
+
+On top of a population model trained via the 8-fold CV above, we simulate a brief
+per-subject **calibration session** at deployment time:
+
+1. Each test subject's windows are ordered chronologically and split into a **calibration
+   slice** (the first `--calib-frac`, default `0.2` ≈ 19 windows / ≈100 s) and an **eval
+   slice** (the remaining 80%, never used for fine-tuning).
+2. A copy of the trained population checkpoint is fine-tuned on the calibration slice only
+   — 20 epochs, Adam, `lr=1e-4` — using the same loss as the original checkpoint by default,
+   or optionally the full composite Huber+CLEF objective via `--calib-loss`.
+3. The calibrated model is evaluated on the eval slice using the same metrics as
+   [Evaluation Metrics](#evaluation-metrics).
+
+Implemented in `scripts/diag_subject_calibration.py` (single-checkpoint pilot) and
+`scripts/diag_calib_loss_ablation.py` (multi-checkpoint, multi-objective sweep at
+full-cohort scale). Motivation and results are in the Diagnostic Experiments section
+below and in Final Report Section 4.4 / 4.7.
 
 ---
 
@@ -552,6 +569,20 @@ effect on the main CV pipeline.
   `results/best_hyperparams.json`) instead of Huber-only — see Section 4.7 of the Final Report for
   the resulting perception-distortion tradeoff comparison on the `arch_reheartnet` diagnostic
   checkpoint.
+- **`diag_calib_loss_ablation.py --calib-loss {huber,mse,composite,clef-only}`** — overrides the
+  per-model `auto` calibration objective for *all* `--models`, e.g. to test the CLEF feature loss
+  on a checkpoint that was never trained with it. Forcing `--calib-loss composite` onto
+  `reheartnet_original` re-trained at Optuna's lr (3.15e-4, a `loss_type="mse"` checkpoint whose
+  `auto` default is Huber-only) found a **clean win-win on all 5 metrics at full scale** (53
+  subjects, 8 folds): RMSE -19.7%, PRD 104.64%→84.11%, r +0.017→+0.463, EMD -49.2%, KS -51.5%,
+  beat-MAE -22.4%. Unlike `arch_reheartnet` (CLEF-trained, already near the EMD/KS frontier —
+  partial tradeoff per Section 4.7), this checkpoint starts ~3-4x farther from the frontier,
+  leaving room for distortion and perceptual-quality metrics to improve together. See
+  Section 4.7 of the Final Report.
+
+![Calibration comparison for three win-win subjects](results/figures/calibration_comparison_multi.png)
+
+*Three representative win-win subjects (bidmc06/fold0, bidmc09/fold1, bidmc15/fold7) from the full-cohort composite-calibration result above — ground truth (blue) vs. baseline population model (orange) vs. per-subject calibrated model (green), first 4 s of the middle eval-slice window. Generated by `scripts/diag_plot_calibration_multi_subject.py`.*
 
 ---
 
