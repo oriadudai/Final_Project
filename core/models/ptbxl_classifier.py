@@ -131,7 +131,8 @@ class CLEFProbeClassifier(nn.Module):
         if feature_dim is None:
             # auto-detect from encoder output (e.g. 256 for small, 1024 for medium)
             with torch.no_grad():
-                _dummy = torch.zeros(1, 1, 5000)  # 500 Hz, 10 s
+                _dev = next(clef_encoder.parameters()).device
+                _dummy = torch.zeros(1, 1, 5000, device=_dev)  # 500 Hz, 10 s
                 feature_dim = clef_encoder(_dummy).shape[-1]
         self.probe = nn.Linear(feature_dim, num_classes)
         self._sigmoid = nn.Sigmoid()
