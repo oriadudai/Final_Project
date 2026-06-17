@@ -181,8 +181,13 @@ def main():
     ap.add_argument("--calib-b-label", type=str, default="Composite")
     ap.add_argument("--batch-size", type=int, default=1)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--crop-sec", type=float, default=None,
-                    help="Crop window to this many seconds (None = full window, default for this script).")
+    ap.add_argument("--crop-sec", type=float, default=4.0,
+                    help="Crop window to this many seconds for readability (default 4s; "
+                         "pass --crop-sec 0 for the full window, e.g. 10s for CLEF's window config).")
+    ap.add_argument("--baseline-loss-label", type=str, default=None,
+                    help="Label for the baseline model's training loss, shown in the plot "
+                         "(default: auto-detected from --model: 'Huber + CLEF' for arch_reheartnet, "
+                         "'MSE' for reheartnet_original, 'Huber' for reheartnet_huber).")
     ap.add_argument("--output", type=str, default=os.path.join("results", "figures", "calibration_asymmetry.png"))
     args = ap.parse_args()
 
@@ -193,6 +198,14 @@ def main():
     folds = [int(f) for f in args.folds.split(",")]
     if len(subjects) != len(folds):
         raise ValueError("--subjects and --folds must have the same length")
+
+    if args.baseline_loss_label is None:
+        args.baseline_loss_label = {
+            "arch_reheartnet": "Huber + CLEF",
+            "reheartnet_original": "MSE",
+            "reheartnet_huber": "Huber",
+        }.get(args.model, args.model)
+        print(f"baseline_loss_label auto-detected from --model={args.model}: {args.baseline_loss_label}")
 
     mse_criterion = nn.MSELoss()
 
@@ -223,7 +236,8 @@ def main():
     for subject, fold in zip(subjects, folds):
         results.append(run_subject(args, subject, fold, mse_criterion, composite_criterion, device))
 
-    plot_calibration_asymmetry(results, fs=config.FS, save_path=args.output, crop_sec=args.crop_sec)
+    plot_calibration_asymmetry(results, fs=config.FS, save_path=args.output, crop_sec=args.crop_sec,
+                                baseline_loss_label=args.baseline_loss_label)
     print(f"\nSaved plot to {args.output}")
 
 
