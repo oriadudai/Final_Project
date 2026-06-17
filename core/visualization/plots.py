@@ -252,11 +252,19 @@ def plot_calibration_asymmetry(
         bm = s.get("baseline_metrics")
         am = s.get("calib_a_metrics")
         cm = s.get("calib_b_metrics")
+
+        def _row(label, mm):
+            line = (f"{label}: RMSE={mm['rmse']:.3f}  PRD={mm['prd']:5.1f}%  r={mm['pearson_r']:+.2f}  "
+                     f"EMD={mm['emd']:.3f}  KS={mm['ks_stat']:.3f}")
+            if "diag_kl" in mm and "flip_rate" in mm:
+                line += f"  KL={mm['diag_kl']:.3f}  flip={mm['flip_rate']:.2f}"
+            return line
+
         if bm and am and cm:
             title += (
-                f"\nBaseline{baseline_tag}: PRD={bm['prd']:5.1f}%  r={bm['pearson_r']:+.2f}  EMD={bm['emd']:.3f}  KS={bm['ks_stat']:.3f}\n"
-                f"+{s.get('calib_a_label', 'A'):<9}: PRD={am['prd']:5.1f}%  r={am['pearson_r']:+.2f}  EMD={am['emd']:.3f}  KS={am['ks_stat']:.3f}\n"
-                f"+{s.get('calib_b_label', 'B'):<9}: PRD={cm['prd']:5.1f}%  r={cm['pearson_r']:+.2f}  EMD={cm['emd']:.3f}  KS={cm['ks_stat']:.3f}"
+                "\n" + _row(f"Baseline{baseline_tag}", bm)
+                + "\n" + _row(f"+{s.get('calib_a_label', 'A')}", am)
+                + "\n" + _row(f"+{s.get('calib_b_label', 'B')}", cm)
             )
         ax.set_title(title, fontsize=8.5, family="monospace", loc="left")
         ax.set_xlabel("Time (s)", fontsize=8)

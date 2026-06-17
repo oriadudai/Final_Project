@@ -47,6 +47,7 @@ from core.train import train_one_epoch
 from core.losses.composite_loss import ClinicalCompositeLoss, load_clef_encoder
 from core.visualization.plots import plot_calibration_asymmetry
 from diag_subject_calibration import chronological_calib_eval_split
+from diag_calib_loss_ablation import _load_diag_clf, _run_diag
 
 # Models trained via run_cv.py: checkpoints live at the fixed config.CHECKPOINT_DIR,
 # named only by model_name + fold (mirrors diag_calib_loss_ablation.py's EXTRA_MODELS).
@@ -98,7 +99,17 @@ def calibrate_copy(base_state_dict, hidden_size, calib_loader, criterion, args, 
     return model
 
 
-def run_subject(args, subject, fold, mse_criterion, composite_criterion, device):
+def _add_diag_metrics(metrics, true_arr, pred_arr, diag_clf, device):
+    """In-place: add diag_kl / flip_rate to a quick_metrics_from_arrays() dict."""
+    if diag_clf is None:
+        return metrics
+    kl, flip_rate, _, _ = _run_diag(true_arr, pred_arr, diag_clf, device)
+    metrics["diag_kl"] = kl
+    metrics["flip_rate"] = flip_rate
+    return metrics
+
+
+def run_subject(args, subject, fold, mse_criterion, composite_criterion, diag_clf, device):
     fold_assignments_path = args.fold_assignments or os.path.join(args.results_dir, "fold_assignments.json")
     with open(fold_assignments_path) as f:
         assignments = json.load(f)
@@ -126,22 +137,28 @@ def run_subject(args, subject, fold, mse_criterion, composite_criterion, device)
     base_model.load_state_dict(ckpt["model_state_dict"])
     true_eval, baseline_pred = predict_all(base_model, eval_loader, device)
     baseline = quick_metrics_from_arrays(true_eval, baseline_pred, config.FS)
-    print(f"  baseline  : PRD={baseline['prd']:6.2f}%  r={baseline['pearson_r']:+.3f}  "
-          f"EMD={baseline['emd']:.4f}  KS={baseline['ks_stat']:.3f}")
+    _add_diag_metrics(baseline, true_eval, baseline_pred, diag_clf, device)
+    print(f"  baseline  : RMSE={baseline['rmse']:.4f}  PRD={baseline['prd']:6.2f}%  r={baseline['pearson_r']:+.3f}  "
+          f"EMD={baseline['emd']:.4f}  KS={baseline['ks_stat']:.3f}"
+          + (f"  KL={baseline['diag_kl']:.3f}  flip={baseline['flip_rate']:.3f}" if diag_clf is not None else ""))
 
     torch.manual_seed(args.seed)
     model_a = calibrate_copy(ckpt["model_state_dict"], hidden_size, calib_loader, mse_criterion, args, device)
     _, calib_a_pred = predict_all(model_a, eval_loader, device)
     calib_a = quick_metrics_from_arrays(true_eval, calib_a_pred, config.FS)
-    print(f"  +{args.calib_a_label:<9}: PRD={calib_a['prd']:6.2f}%  r={calib_a['pearson_r']:+.3f}  "
-          f"EMD={calib_a['emd']:.4f}  KS={calib_a['ks_stat']:.3f}")
+    _add_diag_metrics(calib_a, true_eval, calib_a_pred, diag_clf, device)
+    print(f"  +{args.calib_a_label:<9}: RMSE={calib_a['rmse']:.4f}  PRD={calib_a['prd']:6.2f}%  r={calib_a['pearson_r']:+.3f}  "
+          f"EMD={calib_a['emd']:.4f}  KS={calib_a['ks_stat']:.3f}"
+          + (f"  KL={calib_a['diag_kl']:.3f}  flip={calib_a['flip_rate']:.3f}" if diag_clf is not None else ""))
 
     torch.manual_seed(args.seed)
     model_b = calibrate_copy(ckpt["model_state_dict"], hidden_size, calib_loader, composite_criterion, args, device)
     _, calib_b_pred = predict_all(model_b, eval_loader, device)
     calib_b = quick_metrics_from_arrays(true_eval, calib_b_pred, config.FS)
-    print(f"  +{args.calib_b_label:<9}: PRD={calib_b['prd']:6.2f}%  r={calib_b['pearson_r']:+.3f}  "
-          f"EMD={calib_b['emd']:.4f}  KS={calib_b['ks_stat']:.3f}")
+    _add_diag_metrics(calib_b, true_eval, calib_b_pred, diag_clf, device)
+    print(f"  +{args.calib_b_label:<9}: RMSE={calib_b['rmse']:.4f}  PRD={calib_b['prd']:6.2f}%  r={calib_b['pearson_r']:+.3f}  "
+          f"EMD={calib_b['emd']:.4f}  KS={calib_b['ks_stat']:.3f}"
+          + (f"  KL={calib_b['diag_kl']:.3f}  flip={calib_b['flip_rate']:.3f}" if diag_clf is not None else ""))
 
     window_idx = n_eval // 2
     return {
@@ -188,6 +205,10 @@ def main():
                     help="Label for the baseline model's training loss, shown in the plot "
                          "(default: auto-detected from --model: 'Huber + CLEF' for arch_reheartnet, "
                          "'MSE' for reheartnet_original, 'Huber' for reheartnet_huber).")
+    ap.add_argument("--diagnostic-classifier", type=str,
+                    default=os.path.join("checkpoints", "ptbxl_diagnostic_classifier.pt"),
+                    help="Path to the PTB-XL diagnostic classifier checkpoint, used to compute "
+                         "diag_kl and flip_rate. If not found, KL/flip are omitted from the plot.")
     ap.add_argument("--output", type=str, default=os.path.join("results", "figures", "calibration_asymmetry.png"))
     args = ap.parse_args()
 
@@ -232,9 +253,17 @@ def main():
     print(f"Calibration A: {args.calib_a_label} | Calibration B: {args.calib_b_label} = "
           f"Huber(delta={args.huber_delta}) + {args.lambda_clinical}*CLEF feature loss")
 
+    diag_clf = None
+    if os.path.exists(args.diagnostic_classifier):
+        diag_clf, diag_superclasses = _load_diag_clf(args.diagnostic_classifier, device, clef_encoder=clef_encoder)
+        print(f"Diagnostic classifier loaded: {args.diagnostic_classifier}  (superclasses={diag_superclasses})")
+    else:
+        print(f"WARNING: diagnostic classifier not found at {args.diagnostic_classifier}; "
+              f"KL/flip will be omitted from the plot.")
+
     results = []
     for subject, fold in zip(subjects, folds):
-        results.append(run_subject(args, subject, fold, mse_criterion, composite_criterion, device))
+        results.append(run_subject(args, subject, fold, mse_criterion, composite_criterion, diag_clf, device))
 
     plot_calibration_asymmetry(results, fs=config.FS, save_path=args.output, crop_sec=args.crop_sec,
                                 baseline_loss_label=args.baseline_loss_label)
