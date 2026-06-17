@@ -189,6 +189,80 @@ def plot_calibration_comparison_multi_subject(
     plt.close(fig)
 
 
+def plot_calibration_asymmetry(
+    subjects: List[Dict],
+    fs: int = 125,
+    save_path: Optional[str] = None,
+    crop_sec: Optional[float] = None,
+) -> None:
+    """One panel per subject: real ECG vs baseline vs two calibration variants.
+
+    Illustrates the perception-distortion calibration asymmetry (negative-sum
+    vs. coopetitive regime) by overlaying a distortion-only calibration
+    (e.g.\ MSE) against a composite calibration on the same baseline window.
+
+    Args:
+        subjects: list of dicts, one per subject, each with keys:
+            "subject_id":      label for the panel title.
+            "true_ecg":        (seq_len,) ground-truth window.
+            "baseline_pred":   (seq_len,) reconstruction before calibration.
+            "calib_a_pred":    (seq_len,) reconstruction after calibration A.
+            "calib_a_label":   legend label for calibration A (e.g. "MSE").
+            "calib_b_pred":    (seq_len,) reconstruction after calibration B.
+            "calib_b_label":   legend label for calibration B (e.g. "Composite").
+            "baseline_metrics" / "calib_a_metrics" / "calib_b_metrics": optional
+                dicts with "prd", "pearson_r", "emd", "ks_stat" keys, shown in
+                the panel title.
+        fs:        Sampling frequency.
+        save_path: Full path for the saved PNG. Defaults to
+                   results/figures/calibration_asymmetry.png.
+        crop_sec:  If set, only show the first crop_sec seconds of each window.
+                   None shows the full window (recommended here: a longer
+                   window makes RR-interval drift under distortion
+                   calibration visible across several beats).
+    """
+    if save_path is None:
+        save_path = os.path.join(_FIG_DIR, "calibration_asymmetry.png")
+    _ensure_fig_dir(save_path)
+
+    n = len(subjects)
+    seq_len = subjects[0]["true_ecg"].shape[0]
+    n_crop = min(seq_len, int(round(crop_sec * fs))) if crop_sec else seq_len
+    t = np.arange(n_crop) / fs
+
+    fig, axes = plt.subplots(n, 1, figsize=(11, 4.2 * n), squeeze=False)
+    for row, s in enumerate(subjects):
+        ax = axes[row, 0]
+        ax.plot(t, s["true_ecg"][:n_crop], color="#1f77b4", linewidth=1.5, label="Real ECG", alpha=0.9, zorder=4)
+        ax.plot(t, s["baseline_pred"][:n_crop], color="#7f7f7f", linewidth=1.0, label="Baseline (population)", alpha=0.7, zorder=1)
+        ax.plot(t, s["calib_a_pred"][:n_crop], color="#d62728", linewidth=1.1,
+                label=f"+{s.get('calib_a_label', 'Calib A')} (calibrated)", alpha=0.85, zorder=2)
+        ax.plot(t, s["calib_b_pred"][:n_crop], color="#2ca02c", linewidth=1.1,
+                label=f"+{s.get('calib_b_label', 'Calib B')} (calibrated)", alpha=0.85, zorder=3)
+
+        title = s.get("subject_id", f"Subject {row}")
+        bm = s.get("baseline_metrics")
+        am = s.get("calib_a_metrics")
+        cm = s.get("calib_b_metrics")
+        if bm and am and cm:
+            title += (
+                f"\nBaseline:            PRD={bm['prd']:5.1f}%  r={bm['pearson_r']:+.2f}  EMD={bm['emd']:.3f}  KS={bm['ks_stat']:.3f}\n"
+                f"+{s.get('calib_a_label', 'A'):<9}: PRD={am['prd']:5.1f}%  r={am['pearson_r']:+.2f}  EMD={am['emd']:.3f}  KS={am['ks_stat']:.3f}\n"
+                f"+{s.get('calib_b_label', 'B'):<9}: PRD={cm['prd']:5.1f}%  r={cm['pearson_r']:+.2f}  EMD={cm['emd']:.3f}  KS={cm['ks_stat']:.3f}"
+            )
+        ax.set_title(title, fontsize=8.5, family="monospace", loc="left")
+        ax.set_xlabel("Time (s)", fontsize=8)
+        ax.set_ylabel("Amplitude (z)", fontsize=8)
+        ax.legend(fontsize=7.5, loc="upper right")
+        ax.grid(True, alpha=0.3)
+
+    fig.suptitle("Perception-Distortion Calibration Asymmetry: Real vs Baseline vs Two Calibration Objectives",
+                 fontsize=10.5, y=1.01)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_rr_distributions(
     true_rr: np.ndarray,
     pred_rr: np.ndarray,
