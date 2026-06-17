@@ -100,12 +100,21 @@ def calibrate_copy(base_state_dict, hidden_size, calib_loader, criterion, args, 
 
 
 def _add_diag_metrics(metrics, true_arr, pred_arr, diag_clf, device):
-    """In-place: add diag_kl / flip_rate to a quick_metrics_from_arrays() dict."""
+    """In-place: add diag_kl / flip_rate / true_probs_mean / pred_probs_mean to a metrics dict.
+
+    true_probs_mean is the classifier's mean class-probability vector on the
+    REAL ECG (true_arr) -- i.e. this subject's true pathology classification,
+    independent of which prediction (baseline/+MSE/+Huber/+Composite) is being
+    compared against it. It's identical across calls for the same subject;
+    stored on every condition's metrics dict for convenience when plotting.
+    """
     if diag_clf is None:
         return metrics
-    kl, flip_rate, _, _ = _run_diag(true_arr, pred_arr, diag_clf, device)
+    kl, flip_rate, true_probs_mean, pred_probs_mean = _run_diag(true_arr, pred_arr, diag_clf, device)
     metrics["diag_kl"] = kl
     metrics["flip_rate"] = flip_rate
+    metrics["true_probs_mean"] = true_probs_mean
+    metrics["pred_probs_mean"] = pred_probs_mean
     return metrics
 
 
@@ -189,6 +198,7 @@ def run_subject(args, subject, fold, mse_criterion, composite_criterion, diag_cl
         "baseline_metrics": baseline,
         "calib_a_metrics": calib_a,
         "calib_b_metrics": calib_b,
+        "true_probs_mean": baseline.get("true_probs_mean"),
     }
 
 
@@ -270,7 +280,7 @@ def main():
     print(f"Calibration A: {args.calib_a_label} | Calibration B: {args.calib_b_label} = "
           f"Huber(delta={args.huber_delta}) + {args.lambda_clinical}*CLEF feature loss")
 
-    diag_clf = None
+    diag_clf, diag_superclasses = None, None
     if os.path.exists(args.diagnostic_classifier):
         diag_clf, diag_superclasses = _load_diag_clf(args.diagnostic_classifier, device, clef_encoder=clef_encoder)
         print(f"Diagnostic classifier loaded: {args.diagnostic_classifier}  (superclasses={diag_superclasses})")
@@ -283,7 +293,7 @@ def main():
         results.append(run_subject(args, subject, fold, mse_criterion, composite_criterion, diag_clf, device))
 
     plot_calibration_asymmetry(results, fs=config.FS, save_path=args.output, crop_sec=args.crop_sec,
-                                baseline_loss_label=args.baseline_loss_label)
+                                baseline_loss_label=args.baseline_loss_label, superclasses=diag_superclasses)
     print(f"\nSaved plot to {args.output}")
 
 

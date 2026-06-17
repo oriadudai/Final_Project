@@ -189,12 +189,21 @@ def plot_calibration_comparison_multi_subject(
     plt.close(fig)
 
 
+def _format_true_probs(true_probs_mean: Optional[List[float]], superclasses: Optional[List[str]]) -> str:
+    """'True dx: NORM=0.77 MI=0.13 ...', sorted descending, or '' if unavailable."""
+    if not true_probs_mean or not superclasses:
+        return ""
+    pairs = sorted(zip(superclasses, true_probs_mean), key=lambda x: -x[1])
+    return "True dx (real ECG): " + "  ".join(f"{c}={p:.2f}" for c, p in pairs)
+
+
 def plot_calibration_asymmetry(
     subjects: List[Dict],
     fs: int = 125,
     save_path: Optional[str] = None,
     crop_sec: Optional[float] = 4.0,
     baseline_loss_label: Optional[str] = None,
+    superclasses: Optional[List[str]] = None,
 ) -> None:
     """One panel per subject: real ECG vs baseline vs two calibration variants.
 
@@ -266,6 +275,9 @@ def plot_calibration_asymmetry(
                 + "\n" + _row(f"+{s.get('calib_a_label', 'A')}", am)
                 + "\n" + _row(f"+{s.get('calib_b_label', 'B')}", cm)
             )
+        true_dx = _format_true_probs(s.get("true_probs_mean"), superclasses)
+        if true_dx:
+            title += "\n" + true_dx
         ax.set_title(title, fontsize=8.5, family="monospace", loc="left")
         ax.set_xlabel("Time (s)", fontsize=8)
         ax.set_ylabel("Amplitude (z)", fontsize=8)
@@ -274,6 +286,93 @@ def plot_calibration_asymmetry(
 
     fig.suptitle("Perception-Distortion Calibration Asymmetry: Real vs Baseline vs Two Calibration Objectives",
                  fontsize=10.5, y=1.01)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+_CALIB_COLOR_CYCLE = ["#d62728", "#9467bd", "#2ca02c", "#e377c2", "#8c564b"]
+
+
+def plot_calibration_multi_loss(
+    subjects: List[Dict],
+    fs: int = 125,
+    save_path: Optional[str] = None,
+    crop_sec: Optional[float] = 4.0,
+    baseline_loss_label: Optional[str] = None,
+    suptitle: Optional[str] = None,
+    superclasses: Optional[List[str]] = None,
+) -> None:
+    """One panel per subject: real ECG vs baseline vs an arbitrary number of
+    calibration objectives (generalizes plot_calibration_asymmetry from 2 to N).
+
+    Args:
+        subjects: list of dicts, one per subject, each with keys:
+            "subject_id":      label for the panel title.
+            "true_ecg":        (seq_len,) ground-truth window.
+            "baseline_pred":   (seq_len,) reconstruction before calibration.
+            "baseline_metrics": optional dict with "rmse"/"prd"/"pearson_r"/
+                "emd"/"ks_stat" (and optionally "diag_kl"/"flip_rate") keys.
+            "calibrations":    list of dicts, one per calibration objective,
+                each with "label" (e.g. "MSE"), "pred" (seq_len,), and
+                optional "metrics" (same keys as baseline_metrics).
+        fs:        Sampling frequency.
+        save_path: Full path for the saved PNG. Defaults to
+                   results/figures/calibration_multi_loss.png.
+        crop_sec:  Only show the first crop_sec seconds of each window
+                   (default 4s).
+        baseline_loss_label: Name of the loss the baseline model was trained
+                   with (e.g. "Huber + CLEF"), shown next to "Baseline".
+        suptitle:  Figure-level title. Defaults to a generic description.
+    """
+    if save_path is None:
+        save_path = os.path.join(_FIG_DIR, "calibration_multi_loss.png")
+    _ensure_fig_dir(save_path)
+
+    n = len(subjects)
+    seq_len = subjects[0]["true_ecg"].shape[0]
+    n_crop = min(seq_len, int(round(crop_sec * fs))) if crop_sec else seq_len
+    t = np.arange(n_crop) / fs
+
+    baseline_tag = f" (trained: {baseline_loss_label})" if baseline_loss_label else ""
+
+    def _row(label, mm):
+        line = (f"{label}: RMSE={mm['rmse']:.3f}  PRD={mm['prd']:5.1f}%  r={mm['pearson_r']:+.2f}  "
+                 f"EMD={mm['emd']:.3f}  KS={mm['ks_stat']:.3f}")
+        if "diag_kl" in mm and "flip_rate" in mm:
+            line += f"  KL={mm['diag_kl']:.3f}  flip={mm['flip_rate']:.2f}"
+        return line
+
+    fig, axes = plt.subplots(n, 1, figsize=(11, 4.6 * n), squeeze=False)
+    for row, s in enumerate(subjects):
+        ax = axes[row, 0]
+        ax.plot(t, s["true_ecg"][:n_crop], color="#1f77b4", linewidth=1.5, label="Real ECG", alpha=0.9, zorder=10)
+        ax.plot(t, s["baseline_pred"][:n_crop], color="#7f7f7f", linewidth=1.0,
+                label=f"Baseline{baseline_tag}", alpha=0.7, zorder=1)
+
+        calibrations = s.get("calibrations", [])
+        for i, c in enumerate(calibrations):
+            color = _CALIB_COLOR_CYCLE[i % len(_CALIB_COLOR_CYCLE)]
+            ax.plot(t, c["pred"][:n_crop], color=color, linewidth=1.1,
+                    label=f"+{c['label']} (calibrated)", alpha=0.85, zorder=2 + i)
+
+        title = s.get("subject_id", f"Subject {row}")
+        bm = s.get("baseline_metrics")
+        if bm:
+            title += "\n" + _row(f"Baseline{baseline_tag}", bm)
+            for c in calibrations:
+                if c.get("metrics"):
+                    title += "\n" + _row(f"+{c['label']}", c["metrics"])
+        true_dx = _format_true_probs(s.get("true_probs_mean"), superclasses)
+        if true_dx:
+            title += "\n" + true_dx
+        ax.set_title(title, fontsize=8.5, family="monospace", loc="left")
+        ax.set_xlabel("Time (s)", fontsize=8)
+        ax.set_ylabel("Amplitude (z)", fontsize=8)
+        ax.legend(fontsize=7.5, loc="upper right")
+        ax.grid(True, alpha=0.3)
+
+    fig.suptitle(suptitle or "Real ECG vs Baseline vs Calibration Objectives", fontsize=10.5, y=1.01)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
