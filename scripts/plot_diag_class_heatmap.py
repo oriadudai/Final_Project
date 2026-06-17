@@ -190,7 +190,7 @@ def main():
     plt.tight_layout()
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     plt.savefig(args.out, bbox_inches="tight", dpi=150)
-    print(f"Saved → {args.out}")
+    print(f"Saved -> {args.out}")
     plt.close()
 
 
