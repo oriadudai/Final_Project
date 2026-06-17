@@ -46,7 +46,8 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import core.config as config
-from core.models.ptbxl_classifier import SurrogateECGClassifier
+from core.losses.composite_loss import load_clef_encoder
+from core.models.ptbxl_classifier import CLEFProbeClassifier, SurrogateECGClassifier
 from src.preprocessing import normalize_signal
 
 SUPERCLASSES = ["NORM", "MI", "STTC", "CD", "HYP"]
@@ -137,10 +138,21 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--out", type=str,
                         default=os.path.join(config.CHECKPOINT_DIR, "ptbxl_diagnostic_classifier.pt"))
+    parser.add_argument("--mode", type=str, default="clef-probe",
+                        choices=["clef-probe", "surrogate"],
+                        help="'clef-probe' (default): frozen CLEF encoder + trained Linear(256,5) head. "
+                             "Domain-matched to BIDMC (CLEF pretrained on MIMIC-IV). Trains in minutes. "
+                             "'surrogate': random ResNet trained from scratch. Not recommended.")
+    parser.add_argument("--clef-path", type=str, default=None,
+                        help="Path to CLEF encoder checkpoint (clef-probe mode only). "
+                             "Auto-resolved from --clef-dir and --clef-size if omitted.")
+    parser.add_argument("--clef-dir", type=str, default=config.CLEF_CHECKPOINT_DIR)
+    parser.add_argument("--clef-size", type=str, default="medium",
+                        choices=["small", "medium", "large"])
     args = parser.parse_args()
 
     device = config.DEVICE
-    print(f"Device: {device}")
+    print(f"Device: {device}  |  mode: {args.mode}")
 
     db = pd.read_csv(os.path.join(args.ptbxl_dir, "ptbxl_database.csv"), index_col="ecg_id")
     scp_to_super = _build_scp_to_superclass(args.ptbxl_dir)
@@ -155,11 +167,23 @@ def main() -> None:
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=4)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=4)
 
-    model = SurrogateECGClassifier(num_classes=len(SUPERCLASSES)).to(device)
-    for p in model.parameters():
-        p.requires_grad = True
+    if args.mode == "clef-probe":
+        clef_path = args.clef_path or os.path.join(args.clef_dir, f"clef_{args.clef_size}.ckpt")
+        print(f"Loading CLEF encoder ({args.clef_size}) from {clef_path} ...")
+        clef_encoder = load_clef_encoder(clef_path, args.clef_size, device)
+        model = CLEFProbeClassifier(clef_encoder, num_classes=len(SUPERCLASSES)).to(device)
+        trainable_params = list(model.probe.parameters())
+        print(f"Trainable params: {sum(p.numel() for p in trainable_params)} "
+              f"(probe only — encoder frozen)")
+    else:
+        model = SurrogateECGClassifier(num_classes=len(SUPERCLASSES)).to(device)
+        for p in model.parameters():
+            p.requires_grad = True
+        trainable_params = list(model.parameters())
+        print(f"Trainable params: {sum(p.numel() for p in trainable_params)}")
+
     criterion = nn.BCELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(trainable_params, lr=args.lr)
 
     best_val = float("inf")
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
@@ -170,16 +194,28 @@ def main() -> None:
 
         if val_loss < best_val:
             best_val = val_loss
-            torch.save({
-                "state_dict":   model.state_dict(),
-                "superclasses": SUPERCLASSES,
-                "val_bce":      val_loss,
-                "epoch":        epoch,
-            }, args.out)
-            print(f"  -> saved new best checkpoint to {args.out} (val_bce={val_loss:.4f})")
+            if args.mode == "clef-probe":
+                ckpt = {
+                    "type":             "clef_probe",
+                    "probe_state_dict": model.probe.state_dict(),
+                    "superclasses":     SUPERCLASSES,
+                    "clef_size":        args.clef_size,
+                    "val_bce":          val_loss,
+                    "epoch":            epoch,
+                }
+            else:
+                ckpt = {
+                    "type":             "surrogate",
+                    "state_dict":       model.state_dict(),
+                    "superclasses":     SUPERCLASSES,
+                    "val_bce":          val_loss,
+                    "epoch":            epoch,
+                }
+            torch.save(ckpt, args.out)
+            print(f"  -> saved to {args.out} (val_bce={val_loss:.4f})")
 
     print(f"\nDone. Best val BCE = {best_val:.4f}")
-    print(f"Use it in evaluation via:  --diagnostic-classifier {args.out}")
+    print(f"Use it via:  --diagnostic-classifier {args.out}")
 
 
 if __name__ == "__main__":

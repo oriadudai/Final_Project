@@ -115,6 +115,32 @@ class SurrogateECGClassifier(nn.Module):
 # Factory
 # ---------------------------------------------------------------------------
 
+class CLEFProbeClassifier(nn.Module):
+    """Frozen CLEF encoder (MIMIC-IV pretrained) + small trainable linear probe.
+
+    The encoder never moves — only the 256×num_classes probe head is trained on
+    PTB-XL labels.  Because CLEF was trained on MIMIC-IV (same hospital / patient
+    population as BIDMC), its features are domain-matched to our test ECGs, so the
+    class probabilities this produces are meaningful — unlike the degenerate BCE
+    from sigmoid(raw CLEF features) which collapses to ~log(2) for all inputs.
+    """
+
+    def __init__(self, clef_encoder: nn.Module, num_classes: int = 5, feature_dim: int = 256):
+        super().__init__()
+        self._clef_clf = CLEFClassifier(clef_encoder)   # reuses preprocessing
+        self.probe = nn.Linear(feature_dim, num_classes)
+        self._sigmoid = nn.Sigmoid()
+        for p in clef_encoder.parameters():
+            p.requires_grad = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, 1, seq_len) at 125 Hz  →  (B, num_classes) probabilities
+        with torch.no_grad():
+            x_proc   = self._clef_clf._preprocess(x)
+            features = self._clef_clf.encoder(x_proc)   # (B, 256)
+        return self._sigmoid(self.probe(features))
+
+
 def build_classifier(clef_encoder: Optional[nn.Module]) -> nn.Module:
     """Build the best available classifier for BCE evaluation.
 

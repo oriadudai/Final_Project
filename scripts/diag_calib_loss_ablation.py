@@ -60,6 +60,7 @@ import json
 import os
 import sys
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -71,6 +72,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import core.config as config
 from core.data_loader import build_test_dataset
 from core.models.baselines import get_model
+from core.models.ptbxl_classifier import CLEFProbeClassifier, SurrogateECGClassifier
 from core.train import train_one_epoch
 from core.losses.composite_loss import ClinicalCompositeLoss, load_clef_encoder
 from compare_reheartnet import MODELS
@@ -90,6 +92,78 @@ EXTRA_MODELS = {
         "hidden_size": config.HIDDEN_SIZE,
     },
 }
+
+
+_DEFAULT_SUPERCLASSES = ["NORM", "MI", "STTC", "CD", "HYP"]
+
+
+def _load_diag_clf(path: str, device, clef_encoder=None):
+    ckpt = torch.load(path, map_location="cpu")
+    superclasses = ckpt.get("superclasses", _DEFAULT_SUPERCLASSES)
+    clf_type = ckpt.get("type", "surrogate")
+
+    if clf_type == "clef_probe":
+        if clef_encoder is None:
+            raise ValueError(
+                f"Checkpoint {path} is a clef_probe — CLEF encoder must be loaded. "
+                "Add --calib-loss composite/two-phase, or the script will load CLEF "
+                "automatically when it detects this checkpoint type.")
+        clf = CLEFProbeClassifier(clef_encoder, num_classes=len(superclasses))
+        clf.probe.load_state_dict(ckpt["probe_state_dict"])
+        print(f"  Diagnostic classifier: CLEFProbeClassifier "
+              f"(clef_size={ckpt.get('clef_size', '?')}, {len(superclasses)} classes)")
+    else:
+        clf = SurrogateECGClassifier(num_classes=len(superclasses))
+        clf.load_state_dict(ckpt["state_dict"])
+        print(f"  Diagnostic classifier: SurrogateECGClassifier ({len(superclasses)} classes)")
+
+    for p in clf.parameters():
+        p.requires_grad = False
+    clf.eval()
+    return clf.to(device), superclasses
+
+
+def _collect_preds(model, loader, device):
+    model.eval()
+    t_all, p_all = [], []
+    with torch.no_grad():
+        for ppg, ecg in loader:
+            pred = model(ppg.to(device)).squeeze(-1).cpu().numpy()
+            t_all.append(ecg.squeeze(-1).numpy())
+            p_all.append(pred)
+    return np.concatenate(t_all), np.concatenate(p_all)
+
+
+def _run_diag(true_arr, pred_arr, clf, device, batch_size=64):
+    """KL + flip rate + mean class-probability vectors (true and pred)."""
+    eps = 1e-7
+    kl_vals, flips = [], []
+    true_probs_list, pred_probs_list = [], []
+    N = len(true_arr)
+    for start in range(0, N, batch_size):
+        t = torch.from_numpy(true_arr[start:start + batch_size].astype(np.float32)).unsqueeze(1).to(device)
+        p = torch.from_numpy(pred_arr[start:start + batch_size].astype(np.float32)).unsqueeze(1).to(device)
+        with torch.no_grad():
+            p_real  = clf(t).cpu().numpy()
+            p_recon = clf(p).cpu().numpy()
+        true_probs_list.append(p_real)
+        pred_probs_list.append(p_recon)
+        pr = np.clip(p_real,  eps, 1.0 - eps)
+        pc = np.clip(p_recon, eps, 1.0 - eps)
+        kl = (pr * np.log(pr / pc) + (1.0 - pr) * np.log((1.0 - pr) / (1.0 - pc))).sum(axis=1)
+        kl_vals.extend(kl.tolist())
+        flips.extend((np.argmax(p_real, axis=1) != np.argmax(p_recon, axis=1)).tolist())
+    true_probs_mean  = np.concatenate(true_probs_list).mean(axis=0).tolist()
+    pred_probs_mean  = np.concatenate(pred_probs_list).mean(axis=0).tolist()
+    return float(np.mean(kl_vals)), float(np.mean(flips)), true_probs_mean, pred_probs_mean
+
+
+def _diag_mean_ci(vals):
+    arr = [v for v in vals if not np.isnan(v)]
+    if not arr:
+        return float("nan"), 0.0
+    arr = np.array(arr)
+    return float(np.mean(arr)), (1.96 * float(np.std(arr, ddof=1)) / np.sqrt(len(arr)) if len(arr) > 1 else 0.0)
 
 
 def main():
@@ -113,15 +187,26 @@ def main():
                     help="Delta for the Huber loss used in calibration fine-tuning "
                          "(Huber-only models, and the Huber term of the composite loss).")
     ap.add_argument("--calib-loss", type=str, default="auto",
-                    choices=["auto", "huber", "mse", "composite", "clef-only"],
+                    choices=["auto", "huber", "mse", "composite", "clef-only", "two-phase"],
                     help="Calibration objective for ALL --models. 'auto' (default): "
                          "composite for loss_type='clef' models, Huber-only otherwise. "
-                         "'huber'/'mse': pure distortion losses (Huber(--huber-delta) "
-                         "or plain MSE). 'composite': Huber + lambda*CLEF (the training "
-                         "objective for loss_type='clef' models). 'clef-only': pure "
-                         "CLEF feature-matching loss (huber_weight=0), the opposite "
-                         "extreme from 'huber'/'mse'. Any of these can be forced for "
-                         "ALL --models regardless of how they were trained.")
+                         "'huber'/'mse': pure distortion losses. 'composite': Huber + "
+                         "lambda*CLEF. 'clef-only': pure CLEF (huber_weight=0). "
+                         "'two-phase': MSE for --phase1-epochs then composite for the "
+                         "remaining (--calib-epochs - --phase1-epochs) epochs.")
+    ap.add_argument("--phase1-epochs", type=int, default=10,
+                    help="MSE epochs in phase 1 of two-phase calibration.")
+    ap.add_argument("--phase2-loss", type=str, default="clef-only",
+                    choices=["clef-only", "composite"],
+                    help="Loss for phase 2 of two-phase calibration. "
+                         "'clef-only': pure CLEF feature loss (no Huber term) — maximises "
+                         "distributional pressure after phase 1 has already anchored distortion. "
+                         "'composite': Huber + CLEF — safer but the Huber term largely brakes "
+                         "the CLEF gradient when starting from a good MSE initialization.")
+    ap.add_argument("--diagnostic-classifier", type=str, default=None,
+                    help="Path to checkpoints/ptbxl_diagnostic_classifier.pt. "
+                         "When provided, adds per-subject diag_kl/flip_rate and "
+                         "class-probability vectors to the output JSON for heatmap plotting.")
     ap.add_argument("--lambda-clinical", type=float, default=None,
                     help="Weight for the CLEF feature-matching term in the composite "
                          "calibration loss (used whenever composite calibration is "
@@ -168,8 +253,15 @@ def main():
     mse_criterion = nn.MSELoss()
     clef_criterion = None
     clef_only_criterion = None
+    # Peek at diagnostic classifier checkpoint to see if it needs CLEF encoder
+    _diag_needs_clef = False
+    if args.diagnostic_classifier and os.path.exists(args.diagnostic_classifier):
+        _peek = torch.load(args.diagnostic_classifier, map_location="cpu")
+        _diag_needs_clef = _peek.get("type") == "clef_probe"
+
     needed_kinds = {_calib_loss_kind(k) for k in model_keys}
-    if needed_kinds & {"composite", "clef-only"}:
+    clef_encoder = None
+    if needed_kinds & {"composite", "clef-only", "two-phase"} or _diag_needs_clef:
         if args.lambda_clinical is None:
             best_hp_path = os.path.join("results", "best_hyperparams.json")
             if os.path.exists(best_hp_path):
@@ -188,12 +280,24 @@ def main():
             print(f"CLEF path auto-set: {args.clef_path}")
         print(f"Loading CLEF encoder ({args.clef_size}) for composite/clef-only calibration ...")
         clef_encoder = load_clef_encoder(args.clef_path, args.clef_size, device)
-        if "composite" in needed_kinds:
+        if needed_kinds & {"composite", "two-phase"}:
             clef_criterion = ClinicalCompositeLoss(
                 clef_encoder, args.lambda_clinical, args.huber_delta, huber_weight=1.0).to(device)
-        if "clef-only" in needed_kinds:
+        if needed_kinds & {"clef-only", "two-phase"}:
             clef_only_criterion = ClinicalCompositeLoss(
                 clef_encoder, args.lambda_clinical, args.huber_delta, huber_weight=0.0).to(device)
+
+    diag_clf = None
+    diag_superclasses = _DEFAULT_SUPERCLASSES
+    if args.diagnostic_classifier:
+        if not os.path.exists(args.diagnostic_classifier):
+            print(f"WARNING: --diagnostic-classifier path not found: {args.diagnostic_classifier}. "
+                  "Pathology eval will be skipped.")
+        else:
+            diag_clf, diag_superclasses = _load_diag_clf(
+                args.diagnostic_classifier, device, clef_encoder=clef_encoder)
+            print(f"Loaded diagnostic classifier: {args.diagnostic_classifier} "
+                  f"(superclasses={diag_superclasses})")
 
     results = {}
     for model_key in model_keys:
@@ -233,6 +337,11 @@ def main():
         elif calib_loss_kind == "mse":
             criterion = mse_criterion
             print(f"  Calibration loss: MSE{forced_note}")
+        elif calib_loss_kind == "two-phase":
+            criterion = None  # handled per-subject
+            phase2_epochs = max(0, args.calib_epochs - args.phase1_epochs)
+            print(f"  Calibration loss: two-phase — MSE x{args.phase1_epochs} "
+                  f"then {args.phase2_loss} x{phase2_epochs}{forced_note}")
         else:
             criterion = huber_criterion
             print(f"  Calibration loss: Huber(delta={args.huber_delta}){forced_note}")
@@ -268,9 +377,22 @@ def main():
 
                 baseline = quick_metrics(model, eval_loader, device)
 
+                # Diagnostic eval — baseline
+                true_arr = pred_arr_bl = None
+                if diag_clf is not None:
+                    true_arr, pred_arr_bl = _collect_preds(model, eval_loader, device)
+
                 optimizer = optim.Adam(model.parameters(), lr=args.calib_lr)
-                for _ in range(args.calib_epochs):
-                    train_one_epoch(model, calib_loader, criterion, optimizer, device)
+                if calib_loss_kind == "two-phase":
+                    _p2ep = max(0, args.calib_epochs - args.phase1_epochs)
+                    _p2_criterion = clef_only_criterion if args.phase2_loss == "clef-only" else clef_criterion
+                    for _ in range(args.phase1_epochs):
+                        train_one_epoch(model, calib_loader, mse_criterion, optimizer, device)
+                    for _ in range(_p2ep):
+                        train_one_epoch(model, calib_loader, _p2_criterion, optimizer, device)
+                else:
+                    for _ in range(args.calib_epochs):
+                        train_one_epoch(model, calib_loader, criterion, optimizer, device)
 
                 calibrated = quick_metrics(model, eval_loader, device)
 
@@ -282,11 +404,33 @@ def main():
                       f"KS {baseline['ks_stat']:.3f}->{calibrated['ks_stat']:.3f}  "
                       f"beat-MAE {baseline['beat_timing_mae']:.3f}->{calibrated['beat_timing_mae']:.3f}")
 
-                per_subject.append({
+                entry = {
                     "fold": fold_idx, "subject": subj, "n_windows": n,
                     "n_calib": n_calib, "n_eval": n_eval,
                     "baseline": baseline, "calibrated": calibrated,
-                })
+                }
+
+                # Diagnostic eval — calibrated
+                if diag_clf is not None:
+                    _, pred_arr_cal = _collect_preds(model, eval_loader, device)
+                    bl_kl, bl_flip, true_probs, bl_pred_probs = _run_diag(
+                        true_arr, pred_arr_bl, diag_clf, device)
+                    cal_kl, cal_flip, _, cal_pred_probs = _run_diag(
+                        true_arr, pred_arr_cal, diag_clf, device)
+                    entry["diag"] = {
+                        "superclasses": diag_superclasses,
+                        "baseline_kl": bl_kl,
+                        "baseline_flip_rate": bl_flip,
+                        "calibrated_kl": cal_kl,
+                        "calibrated_flip_rate": cal_flip,
+                        "true_probs_mean": true_probs,
+                        "baseline_pred_probs_mean": bl_pred_probs,
+                        "calibrated_pred_probs_mean": cal_pred_probs,
+                    }
+                    print(f"      diag: kl {bl_kl:.4f}->{cal_kl:.4f}  "
+                          f"flip {bl_flip:.3f}->{cal_flip:.3f}")
+
+                per_subject.append(entry)
 
         if not per_subject:
             print(f"  No checkpoints found for {model_key}, skipping.")
@@ -304,10 +448,31 @@ def main():
                   f"KS={m['ks_stat']['mean']:.3f}+/-{m['ks_stat']['ci95_margin']:.3f}  "
                   f"beat-MAE={m['beat_timing_mae']['mean']:.4f}+/-{m['beat_timing_mae']['ci95_margin']:.4f}s")
 
-        results[model_key] = {
+        model_result = {
             "label": label, "n_subjects": len(per_subject), "n_folds": n_folds_used,
             "per_subject": per_subject, "aggregate": aggregate,
         }
+
+        if per_subject and per_subject[0].get("diag"):
+            diag_agg = {}
+            for split in ("baseline", "calibrated"):
+                kl_vals = [s["diag"][f"{split}_kl"] for s in per_subject]
+                fr_vals = [s["diag"][f"{split}_flip_rate"] for s in per_subject]
+                kl_mean, kl_ci = _diag_mean_ci(kl_vals)
+                fr_mean, fr_ci = _diag_mean_ci(fr_vals)
+                diag_agg[split] = {
+                    "diag_kl":        {"mean": kl_mean, "ci95_margin": kl_ci},
+                    "diag_flip_rate": {"mean": fr_mean, "ci95_margin": fr_ci},
+                }
+            model_result["diag_aggregate"] = diag_agg
+            print(f"  === {model_key} diag aggregate ===")
+            for split in ("baseline", "calibrated"):
+                kl = diag_agg[split]["diag_kl"]
+                fr = diag_agg[split]["diag_flip_rate"]
+                print(f"    {split}: diag_kl={kl['mean']:.4f}+/-{kl['ci95_margin']:.4f}  "
+                      f"flip_rate={fr['mean']:.3f}+/-{fr['ci95_margin']:.3f}")
+
+        results[model_key] = model_result
 
     os.makedirs(args.output_dir, exist_ok=True)
     out_path = os.path.join(args.output_dir, "calib_loss_ablation_summary.json")
