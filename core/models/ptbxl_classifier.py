@@ -118,16 +118,21 @@ class SurrogateECGClassifier(nn.Module):
 class CLEFProbeClassifier(nn.Module):
     """Frozen CLEF encoder (MIMIC-IV pretrained) + small trainable linear probe.
 
-    The encoder never moves — only the 256×num_classes probe head is trained on
-    PTB-XL labels.  Because CLEF was trained on MIMIC-IV (same hospital / patient
-    population as BIDMC), its features are domain-matched to our test ECGs, so the
-    class probabilities this produces are meaningful — unlike the degenerate BCE
-    from sigmoid(raw CLEF features) which collapses to ~log(2) for all inputs.
+    The encoder never moves — only the probe head is trained on PTB-XL labels.
+    Because CLEF was trained on MIMIC-IV (same hospital / patient population as
+    BIDMC), its features are domain-matched to our test ECGs, so the class
+    probabilities this produces are meaningful — unlike the degenerate BCE from
+    sigmoid(raw CLEF features) which collapses to ~log(2) for all inputs.
     """
 
-    def __init__(self, clef_encoder: nn.Module, num_classes: int = 5, feature_dim: int = 256):
+    def __init__(self, clef_encoder: nn.Module, num_classes: int = 5, feature_dim: int = None):
         super().__init__()
         self._clef_clf = CLEFClassifier(clef_encoder)   # reuses preprocessing
+        if feature_dim is None:
+            # auto-detect from encoder output (e.g. 256 for small, 1024 for medium)
+            with torch.no_grad():
+                _dummy = torch.zeros(1, 1, 5000)  # 500 Hz, 10 s
+                feature_dim = clef_encoder(_dummy).shape[-1]
         self.probe = nn.Linear(feature_dim, num_classes)
         self._sigmoid = nn.Sigmoid()
         for p in clef_encoder.parameters():
@@ -137,7 +142,7 @@ class CLEFProbeClassifier(nn.Module):
         # x: (B, 1, seq_len) at 125 Hz  →  (B, num_classes) probabilities
         with torch.no_grad():
             x_proc   = self._clef_clf._preprocess(x)
-            features = self._clef_clf.encoder(x_proc)   # (B, 256)
+            features = self._clef_clf.encoder(x_proc)
         return self._sigmoid(self.probe(features))
 
 
