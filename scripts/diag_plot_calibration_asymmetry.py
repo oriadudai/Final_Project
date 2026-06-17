@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import core.config as config
 from core.data_loader import build_test_dataset
-from core.metrics.clinical_metrics import compute_beat_timing_mae, compute_emd, compute_ks
+from core.metrics.clinical_metrics import compute_beat_timing_mae, compute_emd, compute_ks, peak_detection_coverage
 from core.models.baselines import get_model
 from core.train import train_one_epoch
 from core.losses.composite_loss import ClinicalCompositeLoss, load_clef_encoder
@@ -109,6 +109,19 @@ def _add_diag_metrics(metrics, true_arr, pred_arr, diag_clf, device):
     return metrics
 
 
+def _print_peak_coverage(label, ecg_arr, fs):
+    """Diagnostic: how many windows actually feed extract_rr_intervals for this signal.
+
+    Checks whether an EMD/KS difference between two conditions reflects a real
+    rhythm difference or just a difference in how many windows clear the
+    min_peaks=3 filter (see core.metrics.clinical_metrics.peak_detection_coverage).
+    """
+    stats = peak_detection_coverage(ecg_arr, fs=fs)
+    print(f"    [peak coverage] {label:<11}: {stats['n_valid']}/{stats['n_windows']} windows "
+          f"have >=3 peaks ({stats['valid_frac']:.0%})  "
+          f"mean_peaks/valid_window={stats['mean_peaks_per_valid_window']:.2f}")
+
+
 def run_subject(args, subject, fold, mse_criterion, composite_criterion, diag_clf, device):
     fold_assignments_path = args.fold_assignments or os.path.join(args.results_dir, "fold_assignments.json")
     with open(fold_assignments_path) as f:
@@ -141,6 +154,8 @@ def run_subject(args, subject, fold, mse_criterion, composite_criterion, diag_cl
     print(f"  baseline  : RMSE={baseline['rmse']:.4f}  PRD={baseline['prd']:6.2f}%  r={baseline['pearson_r']:+.3f}  "
           f"EMD={baseline['emd']:.4f}  KS={baseline['ks_stat']:.3f}"
           + (f"  KL={baseline['diag_kl']:.3f}  flip={baseline['flip_rate']:.3f}" if diag_clf is not None else ""))
+    _print_peak_coverage("Real ECG", true_eval, config.FS)
+    _print_peak_coverage("Baseline", baseline_pred, config.FS)
 
     torch.manual_seed(args.seed)
     model_a = calibrate_copy(ckpt["model_state_dict"], hidden_size, calib_loader, mse_criterion, args, device)
@@ -150,6 +165,7 @@ def run_subject(args, subject, fold, mse_criterion, composite_criterion, diag_cl
     print(f"  +{args.calib_a_label:<9}: RMSE={calib_a['rmse']:.4f}  PRD={calib_a['prd']:6.2f}%  r={calib_a['pearson_r']:+.3f}  "
           f"EMD={calib_a['emd']:.4f}  KS={calib_a['ks_stat']:.3f}"
           + (f"  KL={calib_a['diag_kl']:.3f}  flip={calib_a['flip_rate']:.3f}" if diag_clf is not None else ""))
+    _print_peak_coverage(f"+{args.calib_a_label}", calib_a_pred, config.FS)
 
     torch.manual_seed(args.seed)
     model_b = calibrate_copy(ckpt["model_state_dict"], hidden_size, calib_loader, composite_criterion, args, device)
@@ -159,6 +175,7 @@ def run_subject(args, subject, fold, mse_criterion, composite_criterion, diag_cl
     print(f"  +{args.calib_b_label:<9}: RMSE={calib_b['rmse']:.4f}  PRD={calib_b['prd']:6.2f}%  r={calib_b['pearson_r']:+.3f}  "
           f"EMD={calib_b['emd']:.4f}  KS={calib_b['ks_stat']:.3f}"
           + (f"  KL={calib_b['diag_kl']:.3f}  flip={calib_b['flip_rate']:.3f}" if diag_clf is not None else ""))
+    _print_peak_coverage(f"+{args.calib_b_label}", calib_b_pred, config.FS)
 
     window_idx = n_eval // 2
     return {

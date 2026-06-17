@@ -55,6 +55,55 @@ def extract_rr_intervals(
     return np.array(rr_all, dtype=np.float64)
 
 
+def peak_detection_coverage(
+    ecg_windows: np.ndarray,
+    fs: int = 125,
+    min_peaks: int = 3,
+) -> dict:
+    """Diagnostic: how many windows actually contribute to extract_rr_intervals.
+
+    EMD/KS/beat-timing MAE silently skip windows with fewer than min_peaks
+    detected R-peaks (extract_rr_intervals above). A condition whose signal is
+    too flat for Pan-Tompkins to find peaks will have most windows skipped,
+    so its RR-interval distribution is built from a small, unrepresentative
+    subset -- which can make a low-amplitude reconstruction look artificially
+    rhythm-faithful. Use this to check whether two conditions being compared
+    via compute_emd/compute_ks have comparable window coverage before trusting
+    a difference between them as a real perceptual effect.
+
+    Returns:
+        dict with n_windows, n_valid (>= min_peaks), n_skipped, valid_frac,
+        and mean_peaks_per_valid_window.
+    """
+    try:
+        import neurokit2 as nk  # noqa: PLC0415
+    except ImportError as e:
+        raise ImportError("neurokit2 is required for R-peak detection.") from e
+
+    n_windows = len(ecg_windows)
+    n_valid = 0
+    peak_counts = []
+    for window in ecg_windows:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                _, info = nk.ecg_peaks(window.astype(float), sampling_rate=fs, method="pantompkins1985")
+                peaks = info["ECG_R_Peaks"]
+            except Exception:
+                peaks = []
+        if len(peaks) >= min_peaks:
+            n_valid += 1
+            peak_counts.append(len(peaks))
+
+    return {
+        "n_windows": n_windows,
+        "n_valid": n_valid,
+        "n_skipped": n_windows - n_valid,
+        "valid_frac": n_valid / n_windows if n_windows else float("nan"),
+        "mean_peaks_per_valid_window": float(np.mean(peak_counts)) if peak_counts else float("nan"),
+    }
+
+
 def compute_confidence_interval(
     values: List[float],
 ) -> Tuple[float, float, float]:
