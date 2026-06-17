@@ -45,8 +45,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import core.config as config
 from core.data_loader import build_test_dataset
 from core.metrics.clinical_metrics import compute_confidence_interval
+from core.losses.composite_loss import load_clef_encoder
 from core.models.baselines import get_model
-from core.models.ptbxl_classifier import SurrogateECGClassifier
+from core.models.ptbxl_classifier import CLEFProbeClassifier, SurrogateECGClassifier
 
 _CKPT_RE = re.compile(r"(?P<arch>[a-zA-Z0-9]+)_fold_(?P<fold>\d+)_best\.pt$")
 _DEFAULT_SUPERCLASSES = ["NORM", "MI", "STTC", "CD", "HYP"]
@@ -56,11 +57,20 @@ _DEFAULT_SUPERCLASSES = ["NORM", "MI", "STTC", "CD", "HYP"]
 # Diagnostic classifier (trained by scripts/train_diagnostic_classifier.py)
 # ---------------------------------------------------------------------------
 
-def _load_diagnostic_classifier(path: str):
+def _load_diagnostic_classifier(path: str, clef_encoder=None):
     ckpt = torch.load(path, map_location="cpu")
     superclasses = ckpt.get("superclasses", _DEFAULT_SUPERCLASSES)
-    model = SurrogateECGClassifier(num_classes=len(superclasses))
-    model.load_state_dict(ckpt["state_dict"])
+    clf_type = ckpt.get("type", "surrogate")
+    if clf_type == "clef_probe":
+        if clef_encoder is None:
+            raise ValueError(f"Checkpoint {path} is type clef_probe — pass --clef-path.")
+        model = CLEFProbeClassifier(clef_encoder, num_classes=len(superclasses))
+        model.probe.load_state_dict(ckpt["probe_state_dict"])
+        print(f"  Classifier: CLEFProbeClassifier (clef_size={ckpt.get('clef_size', '?')})")
+    else:
+        model = SurrogateECGClassifier(num_classes=len(superclasses))
+        model.load_state_dict(ckpt["state_dict"])
+        print(f"  Classifier: SurrogateECGClassifier")
     for p in model.parameters():
         p.requires_grad = False
     model.eval()
@@ -144,6 +154,11 @@ def main() -> None:
                         default=os.path.join(config.CHECKPOINT_DIR, "**", "*_fold_*_best.pt"),
                         help="Recursive glob matching saved fold checkpoints "
                              "(default covers both run_cv.py and compare_reheartnet.py layouts)")
+    parser.add_argument("--clef-path", type=str, default=None,
+                        help="CLEF encoder checkpoint (required for clef_probe classifiers).")
+    parser.add_argument("--clef-dir", type=str, default=config.CLEF_CHECKPOINT_DIR)
+    parser.add_argument("--clef-size", type=str, default="medium",
+                        choices=["small", "medium", "large"])
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--out", type=str, default=os.path.join("results", "diag_consistency.json"))
     args = parser.parse_args()
@@ -151,7 +166,16 @@ def main() -> None:
     device = config.DEVICE
     print(f"Device: {device}")
 
-    classifier, superclasses = _load_diagnostic_classifier(args.diagnostic_classifier)
+    # Peek at checkpoint type to decide whether CLEF encoder is needed
+    _peek = torch.load(args.diagnostic_classifier, map_location="cpu")
+    clef_encoder = None
+    if _peek.get("type") == "clef_probe":
+        clef_path = args.clef_path or os.path.join(args.clef_dir, f"clef_{args.clef_size}.ckpt")
+        print(f"Loading CLEF encoder ({args.clef_size}) from {clef_path} ...")
+        clef_encoder = load_clef_encoder(clef_path, args.clef_size, device)
+
+    classifier, superclasses = _load_diagnostic_classifier(
+        args.diagnostic_classifier, clef_encoder=clef_encoder)
     classifier = classifier.to(device)
     print(f"Loaded diagnostic classifier ({args.diagnostic_classifier}, superclasses={superclasses})")
 
