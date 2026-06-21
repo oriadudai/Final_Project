@@ -34,6 +34,15 @@ wandb/
 # Graphify — generated code map (rebuild with: graphify update .)
 graphify-out/
 
+# Reference papers downloaded for reading at repo root — not project outputs.
+# (Final Report/references.bib has the actual citations; these are just local
+# copies for reading, re-download as needed rather than tracking them here.)
+/*.pdf
+
+# Stray local run logs at repo root (not the per-script logs under results/,
+# which are already excluded by the results/ rule above)
+/*.log
+
 # IDE / OS
 .vscode/
 .idea/

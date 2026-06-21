@@ -378,6 +378,125 @@ def plot_calibration_multi_loss(
     plt.close(fig)
 
 
+_MODEL_MARKER_CYCLE = ["o", "s", "^", "D", "P"]
+
+_METRIC_AXIS_LABELS = {
+    "prd": "PRD (%)",
+    "rmse": "RMSE",
+    "emd": "EMD",
+    "ks_stat": "KS statistic",
+    "pearson_r": "Pearson $r$",
+    "beat_timing_mae": "Beat-timing MAE (s)",
+    "diag_kl": "Diagnostic KL",
+    "flip_rate": "Top-1 flip rate",
+}
+
+
+def plot_distortion_perception_plane(
+    models: List[Dict],
+    x_metric: str = "prd",
+    y_metric: str = "emd",
+    save_path: Optional[str] = None,
+    title: Optional[str] = None,
+    annotate_baseline: bool = False,
+) -> None:
+    """Distortion-vs-perception scatter (Blau & Michaeli style), with arrows
+    from each model's baseline to its calibrated variants.
+
+    Locked design per project_distortion_perception_plot_design: x_metric/
+    y_metric default to PRD/EMD only -- diag_kl/flip_rate are deliberately
+    NOT plotted here (they stay in the per-class diagnostic tables, where
+    their CD-specific finding isn't lost to aggregation).
+
+    Args:
+        models: list of dicts, one per model variant, each with:
+            "label":   display name (e.g. "ReHeartNet + CLEF").
+            "baseline": dict with x_metric/y_metric keys (mean values) and
+                optionally f"{metric}_ci" keys (95% CI margin, drawn as
+                error bars).
+            "calibrations": list of dicts, one per calibration objective,
+                each with "label" (e.g. "MSE") plus the same x_metric/
+                y_metric (+ optional _ci) keys as baseline.
+        x_metric, y_metric: keys to read from each point's dict.
+        save_path: defaults to results/figures/distortion_perception_plane.png.
+        title:     figure title. Defaults to a generic description.
+        annotate_baseline: if True, label each baseline point with its
+            model name directly on the plot. Off by default -- the "Model"
+            legend already encodes this via marker shape, and text labels
+            tend to collide with nearby points once several models are
+            plotted together.
+    """
+    if save_path is None:
+        save_path = os.path.join(_FIG_DIR, "distortion_perception_plane.png")
+    _ensure_fig_dir(save_path)
+
+    x_label = _METRIC_AXIS_LABELS.get(x_metric, x_metric)
+    y_label = _METRIC_AXIS_LABELS.get(y_metric, y_metric)
+
+    fig, ax = plt.subplots(figsize=(8.5, 6.2))
+    ax.set_facecolor("white")
+
+    model_handles: List = []
+    calib_handles: Dict[str, object] = {}
+
+    for mi, m in enumerate(models):
+        marker = _MODEL_MARKER_CYCLE[mi % len(_MODEL_MARKER_CYCLE)]
+        bx, by = m["baseline"][x_metric], m["baseline"][y_metric]
+        bx_err = m["baseline"].get(f"{x_metric}_ci")
+        by_err = m["baseline"].get(f"{y_metric}_ci")
+        ax.errorbar(bx, by, xerr=bx_err, yerr=by_err, fmt=marker, color="#8c8c8c",
+                    markersize=10, markeredgecolor="black", markeredgewidth=0.9,
+                    ecolor="#bbbbbb", elinewidth=1.0, capsize=2.5, capthick=1.0,
+                    alpha=0.95, zorder=4)
+        if annotate_baseline:
+            ax.annotate(m["label"], (bx, by), textcoords="offset points",
+                        xytext=(7, 7), fontsize=7.5, color="#333333",
+                        bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.7))
+        model_handles.append(plt.Line2D([], [], marker=marker, linestyle="none",
+                                         color="#8c8c8c", markeredgecolor="black",
+                                         markersize=9, label=m["label"]))
+
+        for ci, c in enumerate(m.get("calibrations", [])):
+            color = _CALIB_COLOR_CYCLE[ci % len(_CALIB_COLOR_CYCLE)]
+            cx, cy = c[x_metric], c[y_metric]
+            cx_err = c.get(f"{x_metric}_ci")
+            cy_err = c.get(f"{y_metric}_ci")
+            ax.annotate("", xy=(cx, cy), xytext=(bx, by),
+                        arrowprops=dict(arrowstyle="-|>", color=color, lw=1.4,
+                                        alpha=0.55, shrinkA=8, shrinkB=8,
+                                        connectionstyle="arc3,rad=0.08"), zorder=2)
+            ax.errorbar(cx, cy, xerr=cx_err, yerr=cy_err, fmt=marker, color=color,
+                        markersize=10, markeredgecolor="black", markeredgewidth=0.9,
+                        ecolor=color, elinewidth=1.0, capsize=2.5, capthick=1.0,
+                        alpha=0.5, zorder=3)
+            ax.scatter([cx], [cy], marker=marker, s=80, facecolor=color,
+                       edgecolor="black", linewidth=0.9, zorder=5)
+            if c["label"] not in calib_handles:
+                calib_handles[c["label"]] = plt.Line2D(
+                    [], [], marker="s", linestyle="none", color=color,
+                    markersize=8, label=f"+{c['label']}")
+
+    ax.set_xlabel(x_label, fontsize=11)
+    ax.set_ylabel(y_label, fontsize=11)
+    ax.set_title(title or "Distortion-Perception Plane: Baseline vs Calibration Objectives",
+                 fontsize=12, pad=10)
+    ax.grid(True, alpha=0.25, linewidth=0.6)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(labelsize=9.5)
+
+    leg1 = ax.legend(handles=model_handles, title="Model", loc="upper left",
+                      bbox_to_anchor=(1.01, 1.0), fontsize=8.5, title_fontsize=9,
+                      frameon=False)
+    ax.add_artist(leg1)
+    leg2 = ax.legend(handles=list(calib_handles.values()), title="Calibration",
+                      loc="upper left", bbox_to_anchor=(1.01, 1.0 - 0.09 * (len(model_handles) + 1.6)),
+                      fontsize=8.5, title_fontsize=9, frameon=False)
+
+    plt.savefig(save_path, dpi=150, bbox_inches="tight", bbox_extra_artists=[leg1, leg2])
+    plt.close(fig)
+
+
 def plot_rr_distributions(
     true_rr: np.ndarray,
     pred_rr: np.ndarray,
