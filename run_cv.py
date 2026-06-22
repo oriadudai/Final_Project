@@ -14,6 +14,11 @@ Resume from a crashed fold:
 
 Dry-run (2 folds, 2 epochs) for sanity check:
     python run_cv.py --clef-path models/clef/clef_small.ckpt --dry-run --no-wandb
+
+Retrain the arch_reheartnet ablation checkpoints used by the calib-3way diagnostics
+(saved under results/comparison_reheartnet_optunalr/ rather than checkpoints/):
+    python run_cv.py --clef-path models/clef/clef_small.ckpt \\
+        --checkpoint-dir results/comparison_reheartnet_optunalr/arch_reheartnet/checkpoints
 """
 
 import argparse
@@ -60,6 +65,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--clef-dir",         type=str, default=config.CLEF_CHECKPOINT_DIR)
     p.add_argument("--clef-size",        type=str, default="auto",  choices=["auto","small","medium","large"])
     p.add_argument("--classifier-path",  type=str, default=None, help="Path to PTB-XL classifier .pt")
+    p.add_argument("--checkpoint-dir",   type=str, default=config.CHECKPOINT_DIR,
+                   help="Where to save/resume fold checkpoints (default: checkpoints/)")
     p.add_argument("--output-dir",       type=str, default="results")
     p.add_argument("--n-folds",          type=int, default=8)
     p.add_argument("--n-subjects",       type=int, default=None, help="Use only the first N BIDMC subjects (smoke testing)")
@@ -175,7 +182,7 @@ def _run_single_model(
 
         print(f"  Train: {len(train_inner)} | Val: {len(val_ds)} | Test: {len(test_ds)} windows")
 
-        ckpt_path = os.path.join(config.CHECKPOINT_DIR, f"{model_name}_fold_{fold_idx:02d}_best.pt")
+        ckpt_path = os.path.join(args.checkpoint_dir, f"{model_name}_fold_{fold_idx:02d}_best.pt")
         resume_ckpt = ckpt_path if (fold_idx == args.resume_fold and os.path.exists(ckpt_path)) else None
         if resume_ckpt:
             print(f"  Mid-fold checkpoint found, resuming from: {resume_ckpt}")
@@ -192,7 +199,7 @@ def _run_single_model(
             lambda_clinical = lambda_clinical,
             huber_delta     = huber_delta,
             hidden_size     = hidden_size,
-            checkpoint_dir  = config.CHECKPOINT_DIR,
+            checkpoint_dir  = args.checkpoint_dir,
             use_wandb           = False,
             lr_schedule         = "linear_decay",   # paper protocol
             early_stop_patience = args.early_stop_patience,
@@ -394,7 +401,7 @@ def main() -> None:
 
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(os.path.join(args.output_dir, "figures"), exist_ok=True)
-    os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     device = config.DEVICE
     print(f"Device: {device}")

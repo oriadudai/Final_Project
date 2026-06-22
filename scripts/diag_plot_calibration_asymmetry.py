@@ -47,14 +47,14 @@ from core.train import train_one_epoch
 from core.losses.composite_loss import ClinicalCompositeLoss, load_clef_encoder
 from core.visualization.plots import plot_calibration_asymmetry
 from diag_subject_calibration import chronological_calib_eval_split
-from diag_calib_loss_ablation import _load_diag_clf, _run_diag
+from diag_calib_loss_ablation import ARCH_REHEARTNET_CKPT_DIR, _load_diag_clf, _run_diag
 
-# Models trained via run_cv.py: checkpoints live at the fixed config.CHECKPOINT_DIR,
+# Models trained via run_cv.py: checkpoints live under ARCH_REHEARTNET_CKPT_DIR,
 # named only by model_name + fold (mirrors diag_calib_loss_ablation.py's EXTRA_MODELS).
 EXTRA_MODELS = {
     "arch_reheartnet": {
         "ckpt_path": lambda fold_idx: os.path.join(
-            config.CHECKPOINT_DIR, f"reheartnet_fold_{fold_idx:02d}_best.pt"),
+            ARCH_REHEARTNET_CKPT_DIR, f"reheartnet_fold_{fold_idx:02d}_best.pt"),
     },
 }
 

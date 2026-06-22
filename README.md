@@ -70,10 +70,11 @@ python scripts/compare_reheartnet.py --only reheartnet_original,reheartnet_huber
 **3. `arch_reheartnet` (the CLEF variant):**
 
 ```bash
-python run_cv.py --all-models --no-wandb
+python run_cv.py --all-models --no-wandb \
+    --checkpoint-dir results/comparison_reheartnet_optunalr/arch_reheartnet/checkpoints
 ```
 
-This launches a 4-architecture ablation (Linear/LSTM/BiLSTM/DC-BiLSTM, all Huber+CLEF loss, Optuna hyperparameters); only the DC-BiLSTM run (`arch_reheartnet`) is used going forward — the other three were descoped early once they showed the same generalization gap (see Appendix). Checkpoints land in the shared `checkpoints/` directory as `reheartnet_fold_XX_best.pt`.
+Checkpoints land in `--checkpoint-dir` (default: shared `checkpoints/`) as `<model>_fold_XX_best.pt`; the diagnostics scripts below expect `arch_reheartnet`'s checkpoints under `results/comparison_reheartnet_optunalr/arch_reheartnet/checkpoints/reheartnet_fold_XX_best.pt`, hence the override above.
 
 ---
 

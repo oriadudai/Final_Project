@@ -151,7 +151,7 @@ def main() -> None:
                         help="Path to checkpoints/ptbxl_diagnostic_classifier.pt "
                              "(scripts/train_diagnostic_classifier.py output)")
     parser.add_argument("--checkpoint-glob", type=str,
-                        default=os.path.join(config.CHECKPOINT_DIR, "**", "*_fold_*_best.pt"),
+                        default=os.path.join("results", "**", "*_fold_*_best.pt"),
                         help="Recursive glob matching saved fold checkpoints "
                              "(default covers both run_cv.py and compare_reheartnet.py layouts)")
     parser.add_argument("--clef-path", type=str, default=None,

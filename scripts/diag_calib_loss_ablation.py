@@ -81,14 +81,17 @@ from diag_subject_calibration import quick_metrics, chronological_calib_eval_spl
 AGG_KEYS = ("rmse", "prd", "pearson_r", "emd", "ks_stat", "beat_timing_mae")
 
 # Models trained via run_cv.py rather than compare_reheartnet.py: checkpoints
-# land in the single fixed config.CHECKPOINT_DIR ("checkpoints/"), named only
-# by model_name + fold -- NOT under {results_dir}/{model_key}/checkpoints/.
+# are organized to mirror compare_reheartnet's {results_dir}/{model_key}/checkpoints/
+# layout, but live under comparison_reheartnet_optunalr regardless of --results-dir
+# since run_cv.py (unlike compare_reheartnet.py) has no per-results-dir notion.
+ARCH_REHEARTNET_CKPT_DIR = os.path.join(
+    "results", "comparison_reheartnet_optunalr", "arch_reheartnet", "checkpoints")
 EXTRA_MODELS = {
     "arch_reheartnet": {
         "label": "ReHeartNet + CLEF (Optuna lr, arch ablation)",
         "loss_type": "clef",
         "ckpt_path": lambda fold_idx: os.path.join(
-            config.CHECKPOINT_DIR, f"reheartnet_fold_{fold_idx:02d}_best.pt"),
+            ARCH_REHEARTNET_CKPT_DIR, f"reheartnet_fold_{fold_idx:02d}_best.pt"),
         "hidden_size": config.HIDDEN_SIZE,
     },
 }
