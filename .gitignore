@@ -11,10 +11,18 @@ venv/
 conda-env/
 
 # Model checkpoints — large binaries, download separately
-checkpoints/
+# (except the PTB-XL diagnostic classifier: small, needed for calibration
+# diagnostics, and not separately downloadable; and the arch_reheartnet
+# fold checkpoints: the third calib-3way model, trained via run_cv.py and
+# saved to this fixed path rather than under results/comparison_reheartnet_optunalr/)
+checkpoints/*
+!checkpoints/ptbxl_diagnostic_classifier.pt
+!checkpoints/reheartnet_fold_*_best.pt
 *.pt
 *.pth
 *.ckpt
+!checkpoints/ptbxl_diagnostic_classifier.pt
+!checkpoints/reheartnet_fold_*_best.pt
 
 # CLEF external repo — nested git repo, not tracked here.
 # Clone and install manually: see README Step 0 / environment.yml
@@ -23,7 +31,12 @@ models/clef_repo/
 models/clef/
 
 # Generated experiment outputs
-results/
+# (except results/comparison_reheartnet_optunalr/: the Optuna-lr
+# reheartnet_original/reheartnet_huber checkpoints + summaries the main
+# report's headline result is built on, not just a regenerable byproduct)
+results/*
+!results/comparison_reheartnet_optunalr/
+!results/comparison_reheartnet_optunalr/**
 
 # Weights & Biases local runs
 wandb/
